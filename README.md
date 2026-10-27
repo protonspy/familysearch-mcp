@@ -36,6 +36,7 @@ repita os passos acima ou chame a tool `fs_set_session_token` com o novo valor.
 | `FAMILYSEARCH_LANG` | Idioma dos textos de exibição (padrão `pt`) |
 | `FAMILYSEARCH_EXPORT_DIR` | Pasta padrão das exportações (padrão `~/familysearch-mcp-exports`) |
 | `FAMILYSEARCH_MIN_INTERVAL_MS` | Intervalo mínimo entre requisições (padrão `150`) |
+| `FAMILYSEARCH_USER_AGENT` | User-Agent enviado nas requisições (padrão: Chrome; o firewall do FamilySearch bloqueia UAs não reconhecidos) |
 
 ## Uso com Claude Code
 
