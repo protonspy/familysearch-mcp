@@ -4,6 +4,9 @@ export const FS_JSON = "application/x-fs-v1+json";
 export const FS_ATOM = "application/x-gedcomx-atom+json";
 /** Os serviços de busca do site (/service/search/...) só aceitam JSON genérico. */
 export const JSON_TYPE = "application/json";
+const USER_AGENT =
+  process.env.FAMILYSEARCH_USER_AGENT ??
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 
 export class FamilySearchError extends Error {
   constructor(
@@ -88,7 +91,8 @@ export class FamilySearchClient {
         Accept: opts.accept ?? FS_JSON,
         Authorization: `Bearer ${this.token}`,
         "Accept-Language": this.lang,
-        "User-Agent": "familysearch-mcp/0.1",
+        // O firewall do FamilySearch bloqueia (403, errorCode 15) User-Agents que não parecem de navegador.
+        "User-Agent": USER_AGENT,
       },
       redirect: "follow",
     });
@@ -121,6 +125,9 @@ function describeStatus(status: number, body: string) {
     case 401:
       return "Token de sessão inválido ou expirado. Copie um novo `fssessionid` do navegador logado.";
     case 403:
+      if (body.includes("blocked by our security service")) {
+        return "Requisição bloqueada pelo firewall do FamilySearch. Ajuste FAMILYSEARCH_USER_AGENT para um User-Agent de navegador.";
+      }
       return "Acesso negado pelo FamilySearch para esta rota (pode exigir permissão de app ou dados de pessoa viva).";
     case 404:
       return "Recurso não encontrado no FamilySearch.";
