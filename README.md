@@ -15,7 +15,28 @@ npm run build
 
 Requer Node.js 20+.
 
-## Autenticação (token de sessão)
+## Extensão do Chrome (recomendado)
+
+Com a extensão instalada, o MCP **pega o token sozinho** da sua sessão logada e faz as consultas **pelo seu
+navegador**, de dentro de uma aba do FamilySearch. Assim você não precisa copiar o token, que expira, e evita os
+bloqueios anti-robô que o site aplica a clientes que não são navegadores, como acontece com o download de imagens.
+
+1. Inicie o MCP uma vez. Ele cria `extension/config.json`, com a porta e uma chave secreta.
+2. Abra `chrome://extensions`, ative o **Modo do desenvolvedor**, clique em **Carregar sem compactação** e escolha a pasta
+   `extension/` deste repositório.
+3. Faça login no FamilySearch nesse Chrome.
+
+A tool `fs_browser_status` mostra se a extensão está conectada e de onde vem o token.
+
+- **Segurança:** a ponte escuta só em `127.0.0.1` e aceita apenas extensões (`Origin: chrome-extension://`) que
+  apresentem a chave. A extensão só executa `GET` em `/platform/` e `/service/` do FamilySearch.
+- **Fallback:** sem o Chrome aberto, o MCP volta ao modo direto com o último token recebido (ou o de
+  `FAMILYSEARCH_TOKEN`/`FAMILYSEARCH_TOKEN_FILE`).
+- **Verificações anti-robô:** a extensão não as resolve. Se aparecer uma, conclua no navegador.
+- **Ritmo:** o limite entre requisições continua valendo. Como as consultas saem da sua sessão, evite rajadas muito
+  grandes para não ter o próprio navegador bloqueado.
+
+## Autenticação manual (sem extensão)
 
 O servidor usa o token da sua sessão logada no site, enviado como `Authorization: Bearer`.
 
@@ -38,6 +59,9 @@ repita os passos acima ou chame a tool `fs_set_session_token` com o novo valor.
 | `FAMILYSEARCH_MIN_INTERVAL_MS` | Intervalo mínimo entre requisições (padrão `150`) |
 | `FAMILYSEARCH_MIN_IMAGE_INTERVAL_MS` | Intervalo mínimo antes de cada download de imagem (padrão `1500`) |
 | `FAMILYSEARCH_USER_AGENT` | User-Agent enviado nas requisições (padrão: Chrome; o firewall do FamilySearch bloqueia UAs não reconhecidos) |
+| `FAMILYSEARCH_BRIDGE_PORT` | Porta local da ponte com a extensão (padrão `17345`; `0` desativa) |
+| `FAMILYSEARCH_IMAGE_CACHE_DIR` | Cache em disco das imagens de documentos (padrão `~/.familysearch-mcp/images`) |
+| `FAMILYSEARCH_DOWNLOADS_DIR` | Onde procurar imagens baixadas pelo botão do visualizador, salvas como `{id}.jpg` (padrão `~/Downloads`) |
 
 ## Uso com Claude Code
 
@@ -63,7 +87,8 @@ Ou no Claude Desktop (`claude_desktop_config.json`):
 
 | Tool | O que faz |
 | --- | --- |
-| `fs_set_session_token` | Troca o token de sessão em tempo de execução |
+| `fs_browser_status` | Conexão com a extensão do Chrome, origem do token e instruções de instalação |
+| `fs_set_session_token` | Troca o token de sessão manualmente (desnecessário com a extensão) |
 | `fs_whoami` | Usuário logado e o id da sua pessoa na árvore |
 | `fs_search_tree` | Busca pessoas na Árvore Familiar (nome, datas, locais, pais, cônjuge) |
 | `fs_search_records` | Busca registros históricos, com facetas para refinar por coleção/local/período |
@@ -106,6 +131,15 @@ testemunhas, notas à margem). Para ler o documento original:
 Imagens de coleções restritas (ex.: vários registros de igreja) retornam erro de permissão: só podem ser vistas em
 um Centro de História da Família ou biblioteca afiliada. O índice continua disponível.
 
+As imagens são procuradas nesta ordem, para evitar requisições repetidas:
+
+1. memória (últimas 4);
+2. cache em disco;
+3. arquivo `{id}.jpg` na pasta Downloads, baixado pelo botão de download do visualizador;
+4. rede: pela extensão, quando conectada; senão, direto.
+
+Depois de um bloqueio anti-robô no modo direto, o download direto de imagens fica em pausa por 30 minutos.
+
 ## Rotas do FamilySearch utilizadas
 
 Mapeadas a partir do tráfego do site com uma sessão logada (todas em `https://www.familysearch.org`):
@@ -144,7 +178,10 @@ Observações do mapeamento:
 - Imagens restritas respondem 403 no `dist.jpg` e não trazem os links `image-deepzoom`/`image-stream-*` nos metadados.
   Com `Accept: image/*` apenas, o erro vira 406.
 - Rajadas de requisições disparam uma proteção anti-robô que responde 200 com HTML ("Pardon Our Interruption");
-  o cliente detecta isso e devolve um erro pedindo para aguardar.
+  o cliente detecta isso e devolve um erro pedindo para aguardar. O bloqueio pode durar horas para clientes que não
+  são navegadores, enquanto o mesmo download pelo Chrome logado continua funcionando.
+- Um Chrome controlado por automação (Playwright/CDP) é barrado na entrada do site (Error 15). Por isso a integração
+  usa uma extensão no Chrome normal do usuário, e não um navegador aberto pelo MCP.
 
 ## Desenvolvimento
 
