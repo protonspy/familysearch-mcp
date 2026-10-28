@@ -52,3 +52,22 @@ test("renderImage recorta, limita o tamanho e gira", async () => {
   const rotated = await renderImage(source, { maxSize: 1000, rotate: 90 });
   assert.deepEqual([rotated.width, rotated.height], [500, 1000]);
 });
+
+test("renderImage desenha as marcas de linha no recorte", async () => {
+  const source = await sharp({ create: { width: 2000, height: 1000, channels: 3, background: "#ffffff" } }).jpeg().toBuffer();
+  const region = { x: 0, y: 0, width: 1, height: 1 };
+  const plain = await renderImage(source, { maxSize: 1000, region });
+  const marked = await renderImage(source, {
+    maxSize: 1000,
+    region,
+    marks: [
+      { region: { x: 0.2, y: 0.4, width: 0.5, height: 0.05 }, label: "1", kind: "body" },
+      { region: { x: 0.05, y: 0.4, width: 0.1, height: 0.05 }, label: "A", kind: "margin" },
+    ],
+  });
+  const stats = async (data: Buffer) => (await sharp(data).stats()).channels.map((c) => Math.round(c.mean));
+  // Página toda branca: só as marcas (vermelho/verde) mudam as médias dos canais.
+  assert.deepEqual(await stats(plain.data), [255, 255, 255]);
+  const [r, g, b] = await stats(marked.data);
+  assert.ok(r < 255 && g < 255 && b < 255);
+});

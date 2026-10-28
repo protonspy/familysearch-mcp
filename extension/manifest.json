@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FamilySearch MCP",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Conecta o familysearch-mcp local à sua sessão do FamilySearch: envia o token e faz as consultas (somente leitura) pelo navegador.",
   "minimum_chrome_version": "116",
   "permissions": ["scripting", "tabs", "cookies", "alarms"],

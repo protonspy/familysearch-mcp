@@ -1,4 +1,4 @@
-import { FS_ATOM, JSON_TYPE, FamilySearchClient } from "./client.js";
+import { BotChallengeError, FS_ATOM, JSON_TYPE, FamilySearchClient } from "./client.js";
 import {
   type CatalogQuery,
   DISCOVERY_ROUTES,
@@ -33,6 +33,18 @@ import {
 } from "./gedcomx.js";
 import { ImageStore, imageFilePath } from "./images.js";
 import { type Region, parseRectangleRegion } from "./imaging.js";
+import { type TextHit, type TextSearchOptions, TranscriptStore, pageText, searchPage } from "./transcript.js";
+
+export interface BookTextQuery extends TextSearchOptions {
+  terms: string[];
+  collectionId?: string;
+  waypointId?: string;
+  imageIds?: string[];
+  fromImage?: number;
+  toImage?: number;
+  maxImages?: number;
+  maxHits?: number;
+}
 
 /**
  * Rotas do FamilySearch usadas pelo servidor, mapeadas a partir do tráfego do site
@@ -128,6 +140,7 @@ export class FamilySearchApi {
   constructor(
     readonly client: FamilySearchClient,
     readonly images = new ImageStore(client),
+    readonly texts = new TranscriptStore(client),
   ) {}
 
   private summarize = (p: GxPerson) => summarizePerson(p, this.client.baseUrl);
@@ -502,6 +515,75 @@ export class FamilySearchApi {
     const data = await this.client.get<Gedcomx>(path, { accept: GEDCOMX_JSON, query: waypointId ? { cc: collectionId } : undefined });
     if (!data) throw new Error("Pasta não encontrada.");
     return { collectionId, ...summarizeWaypoint(data, offset, count) };
+  }
+
+  /** Transcrição automática (IA) de uma página, linha a linha, com a posição de cada linha na imagem. */
+  async getImageText(documentId: string, withLines = false) {
+    const { imageId } = await this.locateDocument(documentId);
+    const { page, source } = await this.texts.get(imageId);
+    if (!page) throw new Error(`O FamilySearch não tem transcrição automática para a imagem 3:1:${imageId}.`);
+    return clean({
+      imageId,
+      url: `${this.client.baseUrl}/ark:/61903/3:1:${imageId}`,
+      source,
+      text: pageText(page),
+      lines: withLines ? page.blocks.flat() : undefined,
+    });
+  }
+
+  /**
+   * Procura nomes nas transcrições de todas as páginas de um livro (pasta de imagens) ou de uma lista de imagens,
+   * tolerando grafias e erros de leitura. Devolve os trechos com a região de cada um na página.
+   */
+  async searchBookText(q: BookTextQuery) {
+    let title: string | undefined;
+    let images: { number: number; imageId: string }[];
+    if (q.waypointId) {
+      if (!q.collectionId) throw new Error("Informe o collectionId junto com o waypointId.");
+      const book = await this.browseImages(q.collectionId, q.waypointId, 0, 100_000);
+      if (!book.images?.length) throw new Error(`A pasta "${book.title}" não tem imagens (é uma pasta de pastas): escolha um livro dentro dela.`);
+      title = book.title;
+      images = book.images.filter((i): i is { number: number; imageId: string } => Boolean(i.imageId));
+    } else if (q.imageIds?.length) {
+      images = q.imageIds.map((id, i) => ({ number: i + 1, imageId: id.replace(/^.*3:1:/, "").replace(/[?#].*$/, "") }));
+    } else throw new Error("Informe um livro (collectionId + waypointId) ou uma lista de imageIds.");
+
+    const from = Math.max(1, q.fromImage ?? 1);
+    const last = Math.min(images.length, q.toImage ?? images.length, from + (q.maxImages ?? 150) - 1);
+    const hits: TextHit[] = [];
+    const withoutText: number[] = [];
+    const failed: { image: number; error: string }[] = [];
+    let downloaded = 0;
+    let stoppedAt: number | undefined;
+    for (const { number, imageId } of images.slice(from - 1, last)) {
+      try {
+        const { page, source } = await this.texts.get(imageId);
+        if (source === "rede") downloaded++;
+        if (!page) withoutText.push(number);
+        else hits.push(...searchPage(page, q.terms, q, number));
+      } catch (err) {
+        // Verificação anti-robô: parar e devolver o que já foi lido (o cache guarda as páginas baixadas).
+        if (err instanceof BotChallengeError) {
+          stoppedAt = number;
+          failed.push({ image: number, error: err.message });
+          break;
+        }
+        failed.push({ image: number, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    const searchedTo = stoppedAt ? stoppedAt - 1 : last;
+    hits.sort((a, b) => b.terms.length - a.terms.length || (a.imageNumber ?? 0) - (b.imageNumber ?? 0));
+    return clean({
+      book: title,
+      totalImages: images.length,
+      searched: `${from}-${searchedTo}`,
+      downloaded,
+      withoutText: withoutText.length ? withoutText : undefined,
+      failed: failed.length ? failed : undefined,
+      nextImage: searchedTo < images.length && (q.toImage === undefined || searchedTo < q.toImage) ? searchedTo + 1 : undefined,
+      totalHits: hits.length,
+      hits: hits.slice(0, q.maxHits ?? 30),
+    });
   }
 
   /** Busca nas transcrições automáticas de imagens (texto completo), inclusive de livros não indexados. */

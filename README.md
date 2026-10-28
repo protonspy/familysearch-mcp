@@ -30,9 +30,10 @@ A tool `fs_browser_status` mostra se a extensão está conectada e de onde vem o
 
 - **Segurança:** a ponte escuta só em `127.0.0.1` e aceita apenas extensões (`Origin: chrome-extension://`) que
   apresentem a chave. A extensão só executa `GET` em `/platform/` e `/service/` do FamilySearch e `POST` em
-  `/search/filmdatainfo/film-data`, a consulta de leitura que lista as imagens de um filme digital.
+  `/search/filmdatainfo/film-data`, a consulta de leitura que lista as imagens de um filme digital. Fora de
+  `www.familysearch.org`, só lê a transcrição automática de uma página (`GET` em `sg30p0.familysearch.org`, sem cookies).
 - **Atualização:** depois de atualizar o repositório, recarregue a extensão em `chrome://extensions`. `fs_get_film`
-  precisa da versão 0.2.0 ou superior.
+  precisa da versão 0.2.0 ou superior; `fs_search_book_text` e `fs_get_image_text` pela extensão, da 0.3.0.
 - **Fallback:** sem o Chrome aberto, o MCP volta ao modo direto com o último token recebido (ou o de
   `FAMILYSEARCH_TOKEN`/`FAMILYSEARCH_TOKEN_FILE`).
 - **Verificações anti-robô:** a extensão não as resolve. Se aparecer uma, conclua no navegador.
@@ -102,6 +103,12 @@ Ou no Claude Desktop (`claude_desktop_config.json`):
 | `fs_search_catalog` | O que existe microfilmado/digitalizado de um lugar no Catálogo |
 | `fs_get_catalog_item` | Filmes de um item do catálogo: conteúdo de cada um, nº do microfilme e do filme digital (DGS) |
 | `fs_get_film` | Imagens de um filme digital pelo número DGS (requer a extensão) |
+| `fs_search_book_text` | Procura nomes nas transcrições automáticas de todas as páginas de um livro, tolerando grafias, e devolve trecho + região de cada acerto |
+| `fs_get_image_text` | Transcrição automática de uma página, opcionalmente linha a linha com a região de cada linha |
+
+`fs_view_document` com `markLines: true` numera sobre a imagem as linhas da transcrição automática (corpo 1, 2, 3…;
+coluna da margem A, B…) e devolve o texto de cada uma. Combinado com `enhance: true`, serve para transcrever um assento
+linha a linha e deixar a leitura conferível por quem olha a imagem.
 | `fs_view_document` | Devolve a imagem do documento para leitura/transcrição: recorte automático do assento, zoom por `region`, grade de coordenadas, realce de tinta desbotada, rotação e navegação para a página anterior/seguinte |
 | `fs_get_person` | Nomes e todos os fatos de uma pessoa |
 | `fs_get_family` | Pais, cônjuges (com casamento) e filhos |
@@ -150,6 +157,12 @@ Muitos livros estão digitalizados mas não indexados: a busca de registros não
    matrimônios, óbitos); com a pasta de um livro, lista as imagens numeradas para ler em sequência.
 3. **Catálogo e filmes:** `fs_search_catalog` com o local (ex.: `"Brasil, Paraíba, Bananeiras"`) → `fs_get_catalog_item`
    mostra o conteúdo de cada filme e o número do filme digital → `fs_get_film` lista as imagens desse filme.
+4. **Livro inteiro de uma vez:** em vez de folhear, `fs_search_book_text` com o `waypointId` do livro (ou os `imageIds`
+   de um filme) e os nomes procurados lê a transcrição de todas as páginas e devolve os trechos onde os nomes aparecem
+   juntos, aceitando variações (Sinesia/Sinezia/Synesia, Manoel/Manuel) e palavras partidas na translineação. Cada
+   acerto traz `region` para recortar o assento com `fs_view_document`. As transcrições ficam em cache em
+   `~/.familysearch-mcp/text` (`FAMILYSEARCH_TEXT_CACHE_DIR`): a primeira leitura de um livro leva ~0,4 s por página
+   e as seguintes são instantâneas.
 
 As imagens são procuradas nesta ordem, para evitar requisições repetidas:
 
@@ -189,6 +202,7 @@ Mapeadas a partir do tráfego do site com uma sessão logada (todas em `https://
 | `GET /service/search/catalog/v3/search?q.place=&q.place.exact=on` | `application/json` | Catálogo (`searchHits[].metadataHit.metadata`) |
 | `GET /service/search/catalog/item/{id}` | `application/json` | Item do catálogo (`source.film_note[]`: `filmno`, `digital_film_no`, `text`) |
 | `POST /search/filmdatainfo/film-data` | `application/json` | Imagens de um filme digital; corpo `{"type":"film-data","args":{"dgsNum":"004016084",...}}` |
+| `GET sg30p0…/service/records/volunteer/orchestration/sls/image/records/3:1:{id}` | `application/json` | Transcrição automática da página (`stuff.regions[].lines[].tokens[]`, retângulos `x,y,w,h` em pixels); exige `FS-User-Agent-Chain` e Bearer, sem cookies |
 
 Observações do mapeamento:
 

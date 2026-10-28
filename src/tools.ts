@@ -8,7 +8,8 @@ import { EXTENSION_DIR } from "./bridge.js";
 import { FamilySearchError } from "./client.js";
 import { EXTENSIONS, type ExportFormat, exportTree } from "./export.js";
 import { clean } from "./gedcomx.js";
-import { padRegion, renderImage } from "./imaging.js";
+import { clampRegion, padRegion, renderImage } from "./imaging.js";
+import { type LineMark, marksInRegion } from "./transcript.js";
 import { FamilyTree, TreeBuilder, findRelationship } from "./tree.js";
 
 const personId = z
@@ -376,7 +377,9 @@ export function registerTools(server: McpServer, api: FamilySearchApi) {
         "imagem para leitura e transcrição. Por padrão recorta o assento do registro quando o indexador marcou a região. Para ler " +
         "manuscritos: veja a página com grid=true, depois amplie trechos com `region` (as coordenadas são sempre da imagem inteira e " +
         "aparecem nos rótulos vermelhos da grade); use enhance=true para tinta desbotada e step=±1 para a página anterior/seguinte, " +
-        "já que assentos costumam continuar na outra página. Imagens de coleções restritas retornam erro de permissão.",
+        "já que assentos costumam continuar na outra página. Com markLines=true, numera sobre a imagem as linhas da transcrição " +
+        "automática (corpo 1, 2, 3…; margem A, B…) e devolve o texto de cada uma: transcreva seguindo a mesma numeração, para que o " +
+        "usuário confira a leitura linha a linha. Imagens de coleções restritas retornam erro de permissão.",
       inputSchema: z.object({
         documentId,
         step: z.number().int().min(-20).max(20).default(0).describe("Imagens a avançar (+) ou voltar (−) a partir da imagem do registro"),
@@ -390,11 +393,15 @@ export function registerTools(server: McpServer, api: FamilySearchApi) {
         enhance: z.boolean().default(false).describe("Tons de cinza + contraste local + nitidez, para tinta fraca ou papel manchado"),
         grid: z.boolean().default(false).describe("Sobrepor grade com coordenadas da imagem inteira para pedir recortes precisos"),
         rotate: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]).default(0).describe("Rotação horária em graus"),
+        markLines: z
+          .boolean()
+          .default(false)
+          .describe("Numerar as linhas da transcrição automática sobre a imagem e devolver o texto de cada uma (para conferir a leitura)"),
         saveToFile: z.boolean().default(false).describe(`Salvar também o JPEG em ${path.join(EXPORT_DIR, "images")}`),
       }),
       annotations: readOnly,
     },
-    safe(async ({ documentId, step, region, focusRecord, margin, maxSize, enhance, grid, rotate, saveToFile }) => {
+    safe(async ({ documentId, step, region, focusRecord, margin, maxSize, enhance, grid, rotate, markLines, saveToFile }) => {
       const doc = await api.locateDocument(documentId);
       const imageId = step ? await api.stepImage(doc.imageId, step) : doc.imageId;
       const info = await api.getImageInfo(imageId);
@@ -402,7 +409,21 @@ export function registerTools(server: McpServer, api: FamilySearchApi) {
       // A região do indexador só vale para a imagem do próprio registro.
       const recordRegion = step ? undefined : doc.region;
       const crop = region ?? (focusRecord && recordRegion ? padRegion(recordRegion, margin) : undefined);
-      const image = await renderImage(source, { region: crop, maxSize, enhance, grid, rotate });
+
+      // Linhas da transcrição automática dentro do recorte, rotuladas para a leitura ser conferida sobre a imagem.
+      let marks: LineMark[] | undefined;
+      let marksNote: string | undefined;
+      if (markLines) {
+        try {
+          const { page } = await api.texts.get(imageId);
+          marks = page ? marksInRegion(page, clampRegion(crop ?? { x: 0, y: 0, width: 1, height: 1 })) : [];
+          if (!page) marksNote = "O FamilySearch não tem transcrição automática desta imagem: nada a marcar.";
+          else if (!marks.length) marksNote = "Nenhuma linha transcrita dentro do recorte.";
+        } catch (err) {
+          marksNote = `Não foi possível obter a transcrição para marcar as linhas: ${err instanceof Error ? err.message : err}`;
+        }
+      }
+      const image = await renderImage(source, { region: crop, maxSize, enhance, grid, rotate, marks });
 
       let savedTo: string | undefined;
       if (saveToFile) {
@@ -422,6 +443,14 @@ export function registerTools(server: McpServer, api: FamilySearchApi) {
         outputSize: `${image.width}x${image.height}`,
         scale: image.scale,
         savedTo,
+        markedLines: marks?.length
+          ? {
+              note:
+                "Transcrição automática de cada linha marcada (corpo: números; margem: letras). Ela erra nomes, abreviações e " +
+                "números: use só como guia e transcreva da imagem seguindo a mesma numeração.",
+              lines: marks.map((m) => `${m.label}\t${m.text}`),
+            }
+          : marksNote,
       });
       return new RawResult({
         content: [
@@ -450,6 +479,55 @@ export function registerTools(server: McpServer, api: FamilySearchApi) {
       annotations: readOnly,
     },
     safe(async ({ collectionId, waypointId, offset, count }) => api.browseImages(collectionId, waypointId || undefined, offset, count)),
+  );
+
+  server.registerTool(
+    "fs_search_book_text",
+    {
+      title: "Procurar nomes num livro inteiro",
+      description:
+        "Procura nomes nas transcrições automáticas (IA) de TODAS as páginas de um livro sem índice, em vez de folhear imagem por imagem. " +
+        "Tolera grafias antigas e erros de leitura (Sinesia/Sinezia/Synesia, Manoel/Manuel, Pacheco/Pachêco). Use com o waypointId de um " +
+        "livro (fs_browse_images ou o campo `folders` de fs_get_document_info). Cada resultado traz a imagem, os nomes encontrados, o " +
+        "trecho transcrito e `region` para recortar o assento com fs_view_document. Livros grandes são lidos em partes: continue com " +
+        "`fromImage` = `nextImage`. As páginas ficam em cache, então novas buscas no mesmo livro são instantâneas. A transcrição erra: " +
+        "confirme sempre na imagem.",
+      inputSchema: z.object({
+        terms: z
+          .array(z.string().trim().min(2))
+          .min(1)
+          .max(8)
+          .describe('Nomes ou palavras a procurar; cada item pode ter várias palavras seguidas (ex.: ["Sinesia", "Manoel", "Pacheco"])'),
+        collectionId: z.string().trim().optional().describe("Coleção do livro (ex.: 2177286)"),
+        waypointId: z.string().trim().optional().describe("Pasta do livro (ex.: 9VR1-6YS:370202701,370144202,370997701)"),
+        imageIds: z.array(z.string()).max(400).optional().describe("Alternativa ao livro: lista de imagens (ex.: as de fs_get_film)"),
+        fromImage: z.number().int().min(1).optional().describe("Primeira imagem do livro a ler (padrão 1)"),
+        toImage: z.number().int().min(1).optional().describe("Última imagem do livro a ler"),
+        maxImages: z.number().int().min(1).max(400).default(150).describe("Máximo de páginas lidas nesta chamada"),
+        minTerms: z.number().int().min(1).optional().describe("Mínimo de termos diferentes no mesmo trecho (padrão: 2, ou 1 se houver só um termo)"),
+        fuzzy: z.boolean().default(true).describe("Aceitar grafias próximas"),
+        maxHits: z.number().int().min(1).max(200).default(30),
+      }),
+      annotations: readOnly,
+    },
+    safe(async (args) => api.searchBookText(args)),
+  );
+
+  server.registerTool(
+    "fs_get_image_text",
+    {
+      title: "Ler a transcrição de uma página",
+      description:
+        "Devolve a transcrição automática (IA) de uma página, a mesma do painel \"Transcrição\" do visualizador do site. É mais rápido que " +
+        "ler a imagem para ter uma ideia do conteúdo (nomes, datas, filiação); com includeLines, cada linha vem com sua região na imagem " +
+        "para recortar com fs_view_document. A transcrição erra nomes manuscritos: confirme na imagem antes de concluir.",
+      inputSchema: z.object({
+        documentId,
+        includeLines: z.boolean().default(false).describe("Incluir cada linha com a região (coordenadas 0–1 da imagem inteira)"),
+      }),
+      annotations: readOnly,
+    },
+    safe(async ({ documentId, includeLines }) => api.getImageText(documentId, includeLines)),
   );
 
   server.registerTool(
