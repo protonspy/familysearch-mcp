@@ -84,7 +84,8 @@ export class BrowserBridge {
       this.attach(ws);
     });
     return new Promise((resolve, reject) => {
-      http.once("error", reject);
+      // O WebSocketServer repete os erros do servidor HTTP; sem ouvinte, a porta ocupada derrubaria o processo.
+      wss.on("error", reject);
       http.listen(this.port, "127.0.0.1", () => {
         http.unref();
         resolve((http.address() as AddressInfo).port);

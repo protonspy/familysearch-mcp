@@ -47,6 +47,11 @@ test("a ponte recusa chave errada e origem que não é de extensão", async () =
   assert.equal(bridge.connected, false);
 });
 
+test("porta ocupada (outra sessão do MCP) rejeita o start sem derrubar o processo", async () => {
+  const port = await new BrowserBridge(0, KEY).start();
+  await assert.rejects(new BrowserBridge(port, KEY).start(), /EADDRINUSE/);
+});
+
 test("com a extensão conectada, o cliente usa o token e as requisições do navegador", async () => {
   const bridge = new BrowserBridge(0, KEY);
   const port = await bridge.start();
