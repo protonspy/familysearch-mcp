@@ -27,6 +27,11 @@ export interface RequestOptions {
   allowNotFound?: boolean;
 }
 
+export interface BinaryResponse {
+  data: Buffer;
+  contentType: string;
+}
+
 /**
  * Cliente HTTP mínimo da API do FamilySearch autenticado com o token da sessão
  * do navegador (cookie `fssessionid`), enviado como Bearer token.
@@ -41,6 +46,8 @@ export class FamilySearchClient {
     readonly baseUrl = process.env.FAMILYSEARCH_BASE_URL ?? "https://www.familysearch.org",
     readonly lang = process.env.FAMILYSEARCH_LANG ?? "pt",
     private readonly minIntervalMs = Number(process.env.FAMILYSEARCH_MIN_INTERVAL_MS ?? 150),
+    // Downloads de imagem (~1 MB cada) são espaçados mais, para não disparar a proteção anti-robô.
+    private readonly minImageIntervalMs = Number(process.env.FAMILYSEARCH_MIN_IMAGE_INTERVAL_MS ?? 1500),
   ) {
     this.token = loadTokenFromEnv();
   }
@@ -58,6 +65,12 @@ export class FamilySearchClient {
     return this.request<T>(this.resolve(path, opts.query), opts);
   }
 
+  /** GET de conteúdo binário (ex.: imagens de documentos), pela mesma fila e política de retentativa. */
+  async getBinary(path: string, opts: RequestOptions = {}): Promise<BinaryResponse | null> {
+    // Só `image/*` faz o servidor de imagens responder 406 em vez do 403 de imagem restrita.
+    return this.request<BinaryResponse>(this.resolve(path, opts.query), { accept: "image/*, */*;q=0.8", ...opts }, true);
+  }
+
   private resolve(path: string, query?: RequestOptions["query"]) {
     const url = new URL(path, this.baseUrl);
     for (const [key, value] of Object.entries(query ?? {})) {
@@ -66,14 +79,14 @@ export class FamilySearchClient {
     return url.toString();
   }
 
-  private request<T>(url: string, opts: RequestOptions): Promise<T | null> {
+  private request<T>(url: string, opts: RequestOptions, binary = false): Promise<T | null> {
     // Serializa as chamadas e respeita um intervalo mínimo para não estourar o throttling do FamilySearch.
-    const run = this.queue.then(() => this.doRequest<T>(url, opts));
+    const run = this.queue.then(() => this.doRequest<T>(url, opts, binary));
     this.queue = run.catch(() => undefined);
     return run;
   }
 
-  private async doRequest<T>(url: string, opts: RequestOptions, attempt = 0): Promise<T | null> {
+  private async doRequest<T>(url: string, opts: RequestOptions, binary: boolean, attempt = 0): Promise<T | null> {
     if (!this.token) {
       throw new FamilySearchError(
         "Nenhum token de sessão configurado. Defina FAMILYSEARCH_TOKEN ou use a tool fs_set_session_token.",
@@ -82,7 +95,7 @@ export class FamilySearchClient {
       );
     }
 
-    const wait = this.lastRequestAt + this.minIntervalMs - Date.now();
+    const wait = this.lastRequestAt + (binary ? Math.max(this.minIntervalMs, this.minImageIntervalMs) : this.minIntervalMs) - Date.now();
     if (wait > 0) await sleep(wait);
     this.lastRequestAt = Date.now();
 
@@ -101,16 +114,30 @@ export class FamilySearchClient {
       if (attempt >= 4) throw new FamilySearchError("FamilySearch limitou as requisições (throttling).", res.status, url);
       const retryAfter = Number(res.headers.get("retry-after"));
       await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000 * 2 ** attempt);
-      return this.doRequest<T>(url, opts, attempt + 1);
+      return this.doRequest<T>(url, opts, binary, attempt + 1);
     }
 
     if (res.status === 204 || res.status === 304) return null;
     if (res.status === 404 && opts.allowNotFound) return null;
 
+    const contentType = res.headers.get("content-type") ?? "";
+    if (res.ok && binary && !contentType.startsWith("text/html")) {
+      return { data: Buffer.from(await res.arrayBuffer()), contentType } as T;
+    }
     const text = await res.text();
+    // A proteção anti-robô do site responde 200 com uma página HTML de desafio no lugar do conteúdo.
+    if (contentType.startsWith("text/html") && text.includes("Pardon Our Interruption")) {
+      throw new FamilySearchError(
+        "O FamilySearch pausou as requisições com uma verificação anti-robô (\"Pardon Our Interruption\"). " +
+          "Aguarde alguns minutos antes de tentar de novo e evite muitas imagens em sequência.",
+        429,
+        url,
+      );
+    }
     if (!res.ok) {
       throw new FamilySearchError(describeStatus(res.status, text), res.status, url, text.slice(0, 2000));
     }
+    if (binary) throw new FamilySearchError(`Esperava uma imagem e o FamilySearch respondeu ${contentType || "sem tipo"}.`, res.status, url);
     if (!text) return null;
     try {
       return JSON.parse(text) as T;

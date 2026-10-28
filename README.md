@@ -36,6 +36,7 @@ repita os passos acima ou chame a tool `fs_set_session_token` com o novo valor.
 | `FAMILYSEARCH_LANG` | Idioma dos textos de exibição (padrão `pt`) |
 | `FAMILYSEARCH_EXPORT_DIR` | Pasta padrão das exportações (padrão `~/familysearch-mcp-exports`) |
 | `FAMILYSEARCH_MIN_INTERVAL_MS` | Intervalo mínimo entre requisições (padrão `150`) |
+| `FAMILYSEARCH_MIN_IMAGE_INTERVAL_MS` | Intervalo mínimo antes de cada download de imagem (padrão `1500`) |
 | `FAMILYSEARCH_USER_AGENT` | User-Agent enviado nas requisições (padrão: Chrome; o firewall do FamilySearch bloqueia UAs não reconhecidos) |
 
 ## Uso com Claude Code
@@ -67,6 +68,8 @@ Ou no Claude Desktop (`claude_desktop_config.json`):
 | `fs_search_tree` | Busca pessoas na Árvore Familiar (nome, datas, locais, pais, cônjuge) |
 | `fs_search_records` | Busca registros históricos, com facetas para refinar por coleção/local/período |
 | `fs_get_record` | Registro completo: pessoa principal, fatos, demais pessoas, citação e pessoas da árvore ligadas |
+| `fs_get_document_info` | Imagem digitalizada de um registro sem baixá-la: pasta no filme, imagem N de M, citação, vizinhas, região do assento e índice de todas as entradas da página |
+| `fs_view_document` | Devolve a imagem do documento para leitura/transcrição: recorte automático do assento, zoom por `region`, grade de coordenadas, realce de tinta desbotada, rotação e navegação para a página anterior/seguinte |
 | `fs_get_person` | Nomes e todos os fatos de uma pessoa |
 | `fs_get_family` | Pais, cônjuges (com casamento) e filhos |
 | `fs_get_ancestors` | Pedigree em numeração Ahnentafel (até 8 gerações) |
@@ -89,6 +92,20 @@ Datas de busca aceitam ano (`"1890"`) ou intervalo (`"1880-1900"`).
 3. `fs_build_tree` a partir do id da árvore com `ancestorGenerations: 12` → `treeId`.
 4. `fs_export_tree` com `format: "gedcom"` e `saveToFile: true` → importe no Gramps, MyHeritage, Ancestry etc.
 
+### Análise de documentos
+
+O índice de um registro costuma trazer só parte do que está escrito no assento (idades, residência, causa da morte,
+testemunhas, notas à margem). Para ler o documento original:
+
+1. `fs_get_document_info` com o id do registro → pasta, imagem N de M, região do assento e as outras entradas da página.
+2. `fs_view_document` com o mesmo id → página inteira, ou só o assento quando o indexador marcou a região.
+3. Para ampliar: chame de novo com `grid: true` e depois `region: {x, y, width, height}` usando as coordenadas dos
+   rótulos da grade (sempre relativas à imagem inteira). `enhance: true` ajuda com tinta desbotada.
+4. Assentos que continuam na página seguinte: `step: 1` (ou `-1` para a anterior).
+
+Imagens de coleções restritas (ex.: vários registros de igreja) retornam erro de permissão: só podem ser vistas em
+um Centro de História da Família ou biblioteca afiliada. O índice continua disponível.
+
 ## Rotas do FamilySearch utilizadas
 
 Mapeadas a partir do tráfego do site com uma sessão logada (todas em `https://www.familysearch.org`):
@@ -108,6 +125,10 @@ Mapeadas a partir do tráfego do site com uma sessão logada (todas em `https://
 | `GET /platform/records/personas/{id}` | `application/x-fs-v1+json` | Registro (persona) |
 | `GET /platform/records/personas/{id}/matches?collection=tree&status=accepted` | `application/x-gedcomx-atom+json` | Pessoas da árvore ligadas ao registro |
 | `GET /platform/places/search?q=name:"..."` | `application/x-gedcomx-atom+json` | Locais |
+| `GET /platform/records/records/{id}` | `application/x-fs-v1+json` | Entrada de registro (ark 1:2): todas as pessoas e a região na imagem |
+| `GET /platform/records/images/3:1:{id}` | `application/x-fs-v1+json` | Metadados da imagem: pasta, citação, `links.self.offset/results`, `prev`/`next` |
+| `GET /platform/records/images/3:1:{id}/records` | `application/x-fs-v1+json` | Entradas indexadas na imagem |
+| `GET /service/records/storage/deepzoomcloud/dz/v1/3:1:{id}/dist.jpg` | `image/*, */*` | Imagem em resolução total (também `image.xml`, `thumb_p200.jpg`) |
 
 Observações do mapeamento:
 
@@ -117,11 +138,18 @@ Observações do mapeamento:
   coleção com `f.collectionId`.
 - Na descendência, `1.2` é o 2º filho de `1` com o cônjuge `1-S1`; `1-S2.1` é o 1º filho com o cônjuge `1-S2`.
 - `display.gender` vem traduzido ("Masculino"); o sexo é lido de `gender.type`.
+- A persona aponta para a imagem por uma `sourceDescription` `DigitalArtifact` (ark 3:1). A descrição `Record` a
+  referencia em `sources[]`, às vezes com o qualificador `RectangleRegion` (`x1,y1,x2,y2` normalizados), que é a
+  posição do assento na página.
+- Imagens restritas respondem 403 no `dist.jpg` e não trazem os links `image-deepzoom`/`image-stream-*` nos metadados.
+  Com `Accept: image/*` apenas, o erro vira 406.
+- Rajadas de requisições disparam uma proteção anti-robô que responde 200 com HTML ("Pardon Our Interruption");
+  o cliente detecta isso e devolve um erro pedindo para aguardar.
 
 ## Desenvolvimento
 
 ```bash
-npm test          # testes unitários (numeração, parentesco, GEDCOM)
+npm test          # testes unitários (numeração, parentesco, GEDCOM, imagens)
 npm run smoke     # integração real: requer FAMILYSEARCH_TOKEN ou FAMILYSEARCH_TOKEN_FILE
 npm run inspect   # MCP Inspector
 ```

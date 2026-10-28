@@ -80,14 +80,26 @@ export interface GxSourceDescription {
   resourceType?: string;
   mediaType?: string;
   descriptions?: { value?: string }[];
+  /** Referências a outras descrições; em registros, aponta para a imagem com a região do assento (`RectangleRegion`). */
+  sources?: { description?: string; descriptionId?: string; qualifiers?: { name?: string; value?: string }[] }[];
+  componentOf?: { description?: string };
+}
+
+export interface GxLink {
+  href?: string;
+  /** Em imagens: posição (1 = primeira) e total de imagens da pasta. */
+  offset?: number;
+  results?: number;
 }
 
 export interface Gedcomx {
+  description?: string;
   persons?: GxPerson[];
   relationships?: GxRelationship[];
   childAndParentsRelationships?: GxChildAndParents[];
   sourceDescriptions?: GxSourceDescription[];
   places?: any[];
+  links?: Record<string, GxLink>;
 }
 
 export interface AtomEntry {
