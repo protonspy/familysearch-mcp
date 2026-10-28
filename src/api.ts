@@ -1,5 +1,21 @@
 import { FS_ATOM, JSON_TYPE, FamilySearchClient } from "./client.js";
 import {
+  type CatalogQuery,
+  DISCOVERY_ROUTES,
+  type FullTextQuery,
+  GEDCOMX_JSON,
+  catalogQuery,
+  filmDataRequest,
+  fullTextQuery,
+  imageFolders,
+  normalizeDgs,
+  summarizeCatalogItem,
+  summarizeCatalogSearch,
+  summarizeFilm,
+  summarizeFullText,
+  summarizeWaypoint,
+} from "./discovery.js";
+import {
   type AtomFeed,
   type Gedcomx,
   type GxPerson,
@@ -396,6 +412,7 @@ export class FamilySearchApi {
     }
     const collection = main?.titles?.[0]?.value?.split("; http")[0];
     if (collection && folders[0] !== collection) folders.unshift(collection);
+    const browse = imageFolders(data);
 
     return clean({
       imageId,
@@ -404,6 +421,8 @@ export class FamilySearchApi {
       imageNumber: data.links?.self?.offset,
       totalImages: data.links?.self?.results,
       folderPath: folders.join(" > ") || undefined,
+      collectionId: browse.collectionId,
+      folders: browse.folders.some((f) => f.waypointId) ? browse.folders : undefined,
       citation: main?.citations?.[0]?.value?.trim(),
       previousImageId: arkId(data.links?.prev?.href, "3:1"),
       nextImageId: arkId(data.links?.next?.href, "3:1"),
@@ -472,6 +491,43 @@ export class FamilySearchApi {
   /** Imagem em resolução total (JPEG) e de onde ela veio (memória, cache, Downloads ou rede). */
   async getImageBytes(imageId: string) {
     return this.images.get(imageId);
+  }
+
+  /**
+   * Navega as pastas de imagens de uma coleção (local > paróquia/cartório > livro > imagens).
+   * Sem `waypointId`, lista as pastas de primeiro nível da coleção.
+   */
+  async browseImages(collectionId: string, waypointId?: string, offset = 0, count = 50) {
+    const path = waypointId ? DISCOVERY_ROUTES.waypoint(waypointId) : DISCOVERY_ROUTES.collectionWaypoints(collectionId);
+    const data = await this.client.get<Gedcomx>(path, { accept: GEDCOMX_JSON, query: waypointId ? { cc: collectionId } : undefined });
+    if (!data) throw new Error("Pasta não encontrada.");
+    return { collectionId, ...summarizeWaypoint(data, offset, count) };
+  }
+
+  /** Busca nas transcrições automáticas de imagens (texto completo), inclusive de livros não indexados. */
+  async searchFullText(query: FullTextQuery, opts: { includeText?: boolean; maxTextChars?: number; facets?: boolean } = {}) {
+    const data = await this.client.get<any>(DISCOVERY_ROUTES.fullTextSearch, { accept: JSON_TYPE, query: fullTextQuery(query) });
+    return summarizeFullText(data, opts);
+  }
+
+  async searchCatalog(query: CatalogQuery, facets = false) {
+    const data = await this.client.get<any>(DISCOVERY_ROUTES.catalogSearch, { accept: JSON_TYPE, query: catalogQuery(query) });
+    return summarizeCatalogSearch(data, facets);
+  }
+
+  async getCatalogItem(id: string) {
+    const itemId = id.trim().replace(/^.*\/catalog\/(item\/|info\/)?/, "");
+    const data = await this.client.get<any>(DISCOVERY_ROUTES.catalogItem(itemId), { accept: JSON_TYPE });
+    if (!data) throw new Error(`Item de catálogo ${itemId} não encontrado.`);
+    return summarizeCatalogItem(itemId, data);
+  }
+
+  /** Imagens de um filme digital (DGS), na ordem do filme, com os itens de catálogo que ele contém. */
+  async getFilm(dgsNumber: string, offset = 0, count = 50) {
+    const dgs = normalizeDgs(dgsNumber);
+    const data = await this.client.post<any>(DISCOVERY_ROUTES.filmData, filmDataRequest(dgs), { accept: JSON_TYPE });
+    if (!data?.images) throw new Error(`Filme digital ${dgs} não encontrado ou sem imagens acessíveis.`);
+    return summarizeFilm(dgs, data, offset, count);
   }
 
   async searchPlaces(name: string, count = 10) {

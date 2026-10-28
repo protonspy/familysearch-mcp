@@ -29,7 +29,10 @@ bloqueios anti-robô que o site aplica a clientes que não são navegadores, com
 A tool `fs_browser_status` mostra se a extensão está conectada e de onde vem o token.
 
 - **Segurança:** a ponte escuta só em `127.0.0.1` e aceita apenas extensões (`Origin: chrome-extension://`) que
-  apresentem a chave. A extensão só executa `GET` em `/platform/` e `/service/` do FamilySearch.
+  apresentem a chave. A extensão só executa `GET` em `/platform/` e `/service/` do FamilySearch e `POST` em
+  `/search/filmdatainfo/film-data`, a consulta de leitura que lista as imagens de um filme digital.
+- **Atualização:** depois de atualizar o repositório, recarregue a extensão em `chrome://extensions`. `fs_get_film`
+  precisa da versão 0.2.0 ou superior.
 - **Fallback:** sem o Chrome aberto, o MCP volta ao modo direto com o último token recebido (ou o de
   `FAMILYSEARCH_TOKEN`/`FAMILYSEARCH_TOKEN_FILE`).
 - **Verificações anti-robô:** a extensão não as resolve. Se aparecer uma, conclua no navegador.
@@ -93,7 +96,12 @@ Ou no Claude Desktop (`claude_desktop_config.json`):
 | `fs_search_tree` | Busca pessoas na Árvore Familiar (nome, datas, locais, pais, cônjuge) |
 | `fs_search_records` | Busca registros históricos, com facetas para refinar por coleção/local/período |
 | `fs_get_record` | Registro completo: pessoa principal, fatos, demais pessoas, citação e pessoas da árvore ligadas |
-| `fs_get_document_info` | Imagem digitalizada de um registro sem baixá-la: pasta no filme, imagem N de M, citação, vizinhas, região do assento e índice de todas as entradas da página |
+| `fs_get_document_info` | Imagem digitalizada de um registro sem baixá-la: pasta no filme (com o `waypointId` de cada pasta), imagem N de M, citação, vizinhas, região do assento e índice de todas as entradas da página |
+| `fs_browse_images` | Navega as pastas de imagens de uma coleção (local > paróquia/cartório > livro > imagens), inclusive livros sem índice |
+| `fs_search_full_text` | Busca nas transcrições automáticas (IA) das imagens, com trechos do texto em volta dos termos |
+| `fs_search_catalog` | O que existe microfilmado/digitalizado de um lugar no Catálogo |
+| `fs_get_catalog_item` | Filmes de um item do catálogo: conteúdo de cada um, nº do microfilme e do filme digital (DGS) |
+| `fs_get_film` | Imagens de um filme digital pelo número DGS (requer a extensão) |
 | `fs_view_document` | Devolve a imagem do documento para leitura/transcrição: recorte automático do assento, zoom por `region`, grade de coordenadas, realce de tinta desbotada, rotação e navegação para a página anterior/seguinte |
 | `fs_get_person` | Nomes e todos os fatos de uma pessoa |
 | `fs_get_family` | Pais, cônjuges (com casamento) e filhos |
@@ -131,6 +139,18 @@ testemunhas, notas à margem). Para ler o documento original:
 Imagens de coleções restritas (ex.: vários registros de igreja) retornam erro de permissão: só podem ser vistas em
 um Centro de História da Família ou biblioteca afiliada. O índice continua disponível.
 
+### Pesquisa complementar (livros sem índice)
+
+Muitos livros estão digitalizados mas não indexados: a busca de registros não os encontra. Caminhos para chegar a eles:
+
+1. **Texto completo:** `fs_search_full_text` com nomes, local e período procura nas transcrições automáticas das páginas,
+   inclusive padrinhos e testemunhas. A transcrição erra: confirme na imagem com `fs_view_document` (`"3:1:<imageId>"`).
+2. **Pastas da coleção:** a partir de qualquer registro do mesmo lugar, `fs_get_document_info` mostra as pastas acima da
+   imagem com o `waypointId`. `fs_browse_images` com a pasta da paróquia lista todos os livros dela (batismos,
+   matrimônios, óbitos); com a pasta de um livro, lista as imagens numeradas para ler em sequência.
+3. **Catálogo e filmes:** `fs_search_catalog` com o local (ex.: `"Brasil, Paraíba, Bananeiras"`) → `fs_get_catalog_item`
+   mostra o conteúdo de cada filme e o número do filme digital → `fs_get_film` lista as imagens desse filme.
+
 As imagens são procuradas nesta ordem, para evitar requisições repetidas:
 
 1. memória (últimas 4);
@@ -163,6 +183,12 @@ Mapeadas a partir do tráfego do site com uma sessão logada (todas em `https://
 | `GET /platform/records/images/3:1:{id}` | `application/x-fs-v1+json` | Metadados da imagem: pasta, citação, `links.self.offset/results`, `prev`/`next` |
 | `GET /platform/records/images/3:1:{id}/records` | `application/x-fs-v1+json` | Entradas indexadas na imagem |
 | `GET /service/records/storage/deepzoomcloud/dz/v1/3:1:{id}/dist.jpg` | `image/*, */*` | Imagem em resolução total (também `image.xml`, `thumb_p200.jpg`) |
+| `GET /platform/records/collections/{cc}/waypoints` | `application/x-gedcomx-v1+json` | Pastas de 1º nível de uma coleção de imagens |
+| `GET /platform/records/waypoints/{id}?cc={cc}` | `application/x-gedcomx-v1+json` | Pasta: subpastas (`Collection`) ou imagens do livro (`DigitalArtifact`); sem `cc` responde 400 |
+| `GET /service/search/fulltext/search?q.text=&q.recordPlace=&q.recordYear.from=&q.recordYear.to=&q.collectionId=` | `application/json` | Texto completo: `entries[].content.textDocument`, `highlightTexts`, facetas |
+| `GET /service/search/catalog/v3/search?q.place=&q.place.exact=on` | `application/json` | Catálogo (`searchHits[].metadataHit.metadata`) |
+| `GET /service/search/catalog/item/{id}` | `application/json` | Item do catálogo (`source.film_note[]`: `filmno`, `digital_film_no`, `text`) |
+| `POST /search/filmdatainfo/film-data` | `application/json` | Imagens de um filme digital; corpo `{"type":"film-data","args":{"dgsNum":"004016084",...}}` |
 
 Observações do mapeamento:
 

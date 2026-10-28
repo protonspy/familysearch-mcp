@@ -92,8 +92,11 @@ export class BrowserBridge {
     });
   }
 
-  /** Executa um GET no FamilySearch pela extensão. `path` inclui a query string. */
-  request(path: string, headers: Record<string, string>): Promise<BridgeResponse> {
+  /**
+   * Executa uma requisição no FamilySearch pela extensão. `path` inclui a query string.
+   * Sem `init` é um GET; a extensão só aceita POST em rotas de consulta específicas (ver background.js).
+   */
+  request(path: string, headers: Record<string, string>, init?: { method: string; body: string }): Promise<BridgeResponse> {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("Extensão do navegador não conectada."));
     const id = randomBytes(8).toString("hex");
@@ -103,7 +106,7 @@ export class BrowserBridge {
         reject(new Error("A extensão do navegador não respondeu a tempo."));
       }, this.timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
-      socket.send(JSON.stringify({ type: "request", id, path, headers }));
+      socket.send(JSON.stringify({ type: "request", id, path, headers, ...init }));
     });
   }
 

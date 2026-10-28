@@ -433,6 +433,105 @@ export function registerTools(server: McpServer, api: FamilySearchApi) {
   );
 
   server.registerTool(
+    "fs_browse_images",
+    {
+      title: "Navegar pastas de imagens",
+      description:
+        "Navega as imagens de uma coleção como no site (local > paróquia/cartório > livro > imagens), inclusive livros SEM índice. " +
+        "Para começar de um registro conhecido, use fs_get_document_info: o campo `folders` traz o `waypointId` de cada pasta acima da " +
+        "imagem (ex.: a paróquia), e abri-lo aqui lista os outros livros (batismos, matrimônios, óbitos). Num livro, devolve as imagens " +
+        "numeradas (imageId), que podem ser lidas com fs_view_document passando \"3:1:<imageId>\". Sem waypointId, lista o 1º nível da coleção.",
+      inputSchema: z.object({
+        collectionId: z.string().trim().regex(/^\d+$/, "Id numérico da coleção").describe("Id da coleção (ex.: 2177286), como vem em fs_get_document_info"),
+        waypointId: z.string().trim().optional().describe('Id da pasta (ex.: "9VRP-2NG:370147101,370147102"); omita para o 1º nível'),
+        offset: z.number().int().min(0).default(0).describe("Primeira imagem a listar (paginação de livros grandes)"),
+        count: z.number().int().min(1).max(500).default(50).describe("Quantas imagens listar"),
+      }),
+      annotations: readOnly,
+    },
+    safe(async ({ collectionId, waypointId, offset, count }) => api.browseImages(collectionId, waypointId || undefined, offset, count)),
+  );
+
+  server.registerTool(
+    "fs_search_full_text",
+    {
+      title: "Buscar no texto completo",
+      description:
+        "Busca nas transcrições automáticas (IA) das imagens do FamilySearch, inclusive páginas que não foram indexadas por voluntários " +
+        "(ex.: livros paroquiais da Paraíba). Encontra nomes citados em qualquer parte do assento (padrinhos, testemunhas, pais). A busca é " +
+        "por termos (não exige todos): confira os trechos devolvidos em `snippets`. Cada resultado é uma imagem (imageId) para abrir com " +
+        "fs_view_document. A transcrição automática erra: confirme sempre na imagem.",
+      inputSchema: z.object({
+        text: z.string().min(2).describe('Palavras a buscar (ex.: "Anselmo Cecilia")'),
+        place: z.string().optional().describe("Local do registro (ex.: Pilões, Paraíba, Brasil)"),
+        years: yearOrRange.optional().describe('Ano ou intervalo do registro ("1897" ou "1890-1900")'),
+        collectionId: z.string().optional().describe("Restringir a uma coleção (ex.: 2177286 = Paraíba, Igreja Católica)"),
+        filters: z.string().optional().describe("Parâmetros extras, ex.: o `params` de uma faceta (`c.collectionId=on&f.collectionId=...`)"),
+        includeText: z.boolean().default(false).describe("Devolver também o texto transcrito da página (truncado)"),
+        maxTextChars: z.number().int().min(200).max(20000).default(4000),
+        includeFacets: z.boolean().default(false).describe("Incluir facetas (coleção, ano, local, tipo) para refinar"),
+        count: z.number().int().min(1).max(100).default(20),
+        offset: z.number().int().min(0).default(0),
+      }),
+      annotations: readOnly,
+    },
+    safe(async ({ includeText, maxTextChars, includeFacets, ...query }) =>
+      api.searchFullText(query, { includeText, maxTextChars, facets: includeFacets }),
+    ),
+  );
+
+  server.registerTool(
+    "fs_search_catalog",
+    {
+      title: "Buscar no catálogo",
+      description:
+        "Busca no Catálogo do FamilySearch o que foi microfilmado/digitalizado de um lugar (registros paroquiais, registro civil...), " +
+        "inclusive o que não está em nenhuma coleção pesquisável. Devolve itens com id (ex.: koha:248067) para abrir com fs_get_catalog_item.",
+      inputSchema: z.object({
+        place: z.string().min(2).describe('Local no formato do catálogo, do geral para o específico (ex.: "Brasil, Paraíba, Bananeiras")'),
+        placeExact: z.boolean().default(true).describe("Só o próprio local (false inclui lugares dentro dele)"),
+        filters: z.string().optional().describe("Parâmetros extras da busca do catálogo (ex.: o `params` de uma faceta)"),
+        includeFacets: z.boolean().default(false),
+        count: z.number().int().min(1).max(100).default(20),
+        offset: z.number().int().min(0).default(0),
+      }),
+      annotations: readOnly,
+    },
+    safe(async ({ includeFacets, ...query }) => api.searchCatalog(query, includeFacets)),
+  );
+
+  server.registerTool(
+    "fs_get_catalog_item",
+    {
+      title: "Item do catálogo",
+      description:
+        "Detalha um item do Catálogo: notas e a lista de filmes, cada um com o conteúdo (ex.: \"Casamentos 1889-1902\"), o número do " +
+        "microfilme e o número do filme digital (dgsNumber). Abra o filme digital com fs_get_film para listar as imagens.",
+      inputSchema: z.object({ itemId: z.string().min(3).describe('Id do item (ex.: "koha:248067") ou a URL dele no catálogo') }),
+      annotations: readOnly,
+    },
+    safe(async ({ itemId }) => api.getCatalogItem(itemId)),
+  );
+
+  server.registerTool(
+    "fs_get_film",
+    {
+      title: "Imagens de um filme digital",
+      description:
+        "Lista as imagens de um filme digital pelo número DGS (ex.: 4016084 ou 004016084), na ordem do filme, com os itens de catálogo " +
+        "que ele contém. Use para livros que só existem no catálogo. Leia as imagens com fs_view_document passando \"3:1:<imageId>\". " +
+        "Requer a extensão do Chrome conectada (o site só oferece esta lista via POST).",
+      inputSchema: z.object({
+        dgsNumber: z.string().min(4).describe("Número do filme digital (DGS), como em fs_get_catalog_item"),
+        offset: z.number().int().min(0).default(0),
+        count: z.number().int().min(1).max(500).default(50),
+      }),
+      annotations: readOnly,
+    },
+    safe(async ({ dgsNumber, offset, count }) => api.getFilm(dgsNumber, offset, count)),
+  );
+
+  server.registerTool(
     "fs_search_places",
     {
       title: "Buscar locais",
