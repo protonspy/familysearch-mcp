@@ -1,11 +1,13 @@
 // Ponte entre o familysearch-mcp (WebSocket em 127.0.0.1) e a sessão do FamilySearch neste navegador.
 // - Envia o token da sessão (cookie fssessionid) ao MCP, inclusive quando ele muda.
 // - Executa GETs de leitura em /platform e /service de dentro de uma aba do FamilySearch.
+// - Executa POST apenas nas rotas de consulta que o site só oferece via POST (lista de imagens de um filme).
 // Não resolve verificações anti-robô: se uma aparecer, o MCP recebe a página e avisa o usuário.
 
 const ORIGIN = "https://www.familysearch.org";
 const ALLOWED_PATH = /^\/(platform|service)\/[^\s]*$/;
-const ALLOWED_HEADERS = new Set(["accept", "authorization", "accept-language"]);
+const ALLOWED_POST_PATH = /^\/search\/filmdatainfo\/film-data(\?[^\s]*)?$/;
+const ALLOWED_HEADERS = new Set(["accept", "authorization", "accept-language", "content-type"]);
 const MAX_RETRY_MS = 30_000;
 
 let ws;
@@ -61,9 +63,12 @@ async function handle(msg) {
   if (msg.type === "ping") return send({ type: "pong" });
   if (msg.type !== "request") return;
   try {
-    if (!ALLOWED_PATH.test(msg.path)) throw new Error(`caminho não permitido: ${msg.path}`);
+    const method = msg.method === "POST" ? "POST" : "GET";
+    const allowed = method === "POST" ? ALLOWED_POST_PATH : ALLOWED_PATH;
+    if (!allowed.test(msg.path)) throw new Error(`caminho não permitido para ${method}: ${msg.path}`);
     const headers = Object.fromEntries(Object.entries(msg.headers ?? {}).filter(([k]) => ALLOWED_HEADERS.has(k.toLowerCase())));
-    const result = await fetchInFamilySearchTab(msg.path, headers);
+    const body = method === "POST" && typeof msg.body === "string" ? msg.body : undefined;
+    const result = await fetchInFamilySearchTab(msg.path, headers, method, body);
     send({ type: "response", id: msg.id, ...result });
   } catch (err) {
     send({ type: "error", id: msg.id, message: String(err?.message ?? err) });
@@ -89,14 +94,14 @@ async function familySearchTab() {
   return tab.id;
 }
 
-async function fetchInFamilySearchTab(path, headers) {
+async function fetchInFamilySearchTab(path, headers, method = "GET", body) {
   const tabId = await familySearchTab();
   const [injection] = await chrome.scripting.executeScript({
     target: { tabId },
     world: "MAIN",
-    args: [path, headers],
-    func: async (p, h) => {
-      const res = await fetch(p, { headers: h, credentials: "include" });
+    args: [path, headers, method, body ?? null],
+    func: async (p, h, m, b) => {
+      const res = await fetch(p, { method: m, headers: h, body: b ?? undefined, credentials: "include" });
       const bytes = new Uint8Array(await res.arrayBuffer());
       let binary = "";
       for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));

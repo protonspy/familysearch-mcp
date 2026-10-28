@@ -64,6 +64,14 @@ test("com a extensão conectada, o cliente usa o token e as requisições do nav
   assert.deepEqual(await client.get("/platform/x", { query: { a: 1 } }), { ok: true });
   assert.equal(seen[0].path, "/platform/x?a=1");
   assert.equal(seen[0].headers.Authorization, "Bearer tok-from-browser");
+  assert.equal(seen[0].method, undefined);
+
+  // POST de consulta: método, corpo JSON e Content-Type chegam à extensão.
+  assert.deepEqual(await client.post("/search/filmdatainfo/film-data", { type: "film-data" }), { ok: true });
+  assert.equal(seen[1].method, "POST");
+  assert.deepEqual(JSON.parse(seen[1].body), { type: "film-data" });
+  assert.equal(seen[1].headers["Content-Type"], "application/json");
+  seen.length = 1;
 
   await assert.rejects(client.getBinary("/service/records/storage/deepzoomcloud/dz/v1/3:1:AAAA-BBBB-CC/dist.jpg"), (err) => {
     assert.ok(err instanceof BotChallengeError);

@@ -50,6 +50,8 @@ export interface RequestOptions {
   query?: Record<string, string | number | boolean | undefined>;
   /** Rotas que podem responder 404 sem que isso seja um erro (retorna null). */
   allowNotFound?: boolean;
+  /** Corpo JSON de um POST (só usado por `post`). */
+  body?: unknown;
 }
 
 export interface BinaryResponse {
@@ -117,6 +119,14 @@ export class FamilySearchClient {
     return this.request<T>(this.resolve(path, opts.query), opts);
   }
 
+  /**
+   * POST de leitura com corpo JSON. Usado só por serviços do site que consultam via POST
+   * (ex.: `/search/filmdatainfo/film-data`, a lista de imagens de um filme digital).
+   */
+  async post<T = any>(path: string, body: unknown, opts: RequestOptions = {}): Promise<T | null> {
+    return this.request<T>(this.resolve(path, opts.query), { ...opts, body });
+  }
+
   /** GET de conteúdo binário (ex.: imagens de documentos), pela mesma fila e política de retentativa. */
   async getBinary(path: string, opts: RequestOptions = {}): Promise<BinaryResponse | null> {
     // Só `image/*` faz o servidor de imagens responder 406 em vez do 403 de imagem restrita.
@@ -154,14 +164,12 @@ export class FamilySearchClient {
     if (wait > 0) await sleep(wait);
     this.lastRequestAt = Date.now();
 
-    const headers = { Accept: opts.accept ?? FS_JSON, Authorization: `Bearer ${this.token}`, "Accept-Language": this.lang };
+    const headers: Record<string, string> = { Accept: opts.accept ?? FS_JSON, Authorization: `Bearer ${this.token}`, "Accept-Language": this.lang };
+    const init = opts.body === undefined ? undefined : { method: "POST", body: JSON.stringify(opts.body) };
+    if (init) headers["Content-Type"] = JSON_TYPE;
     const res = viaBrowser
-      ? await this.fetchViaBrowser(url, headers)
-      : await fetch(url, {
-          // O firewall do FamilySearch bloqueia (403, errorCode 15) User-Agents que não parecem de navegador.
-          headers: { ...headers, "User-Agent": USER_AGENT },
-          redirect: "follow",
-        });
+      ? await this.fetchViaBrowser(url, headers, init)
+      : await this.fetchDirect(url, headers, init);
 
     if (res.status === 429 || res.status === 503) {
       if (attempt >= 4) throw new FamilySearchError("FamilySearch limitou as requisições (throttling).", res.status, url);
@@ -195,11 +203,22 @@ export class FamilySearchClient {
     }
   }
 
-  /** Executa o GET pela extensão; se ela cair no meio do caminho, faz a requisição diretamente. */
-  private async fetchViaBrowser(url: string, headers: Record<string, string>) {
+  private fetchDirect(url: string, headers: Record<string, string>, init?: RequestInit) {
+    // Os serviços em /search/ do site autenticam pelo cookie da sessão, não pelo Bearer token.
+    const cookie: Record<string, string> = new URL(url).pathname.startsWith("/search/") ? { Cookie: `fssessionid=${this.token}` } : {};
+    return fetch(url, {
+      ...init,
+      // O firewall do FamilySearch bloqueia (403, errorCode 15) User-Agents que não parecem de navegador.
+      headers: { ...headers, ...cookie, "User-Agent": USER_AGENT },
+      redirect: "follow",
+    });
+  }
+
+  /** Executa a requisição pela extensão; se ela cair no meio do caminho, faz a requisição diretamente. */
+  private async fetchViaBrowser(url: string, headers: Record<string, string>, init?: { method: string; body: string }) {
     const { pathname, search } = new URL(url);
     try {
-      const r = await this.bridge!.request(pathname + search, headers);
+      const r = await this.bridge!.request(pathname + search, headers, init);
       const nullBody = r.status === 204 || r.status === 304;
       return new Response(nullBody ? null : new Uint8Array(r.body), {
         status: r.status,
@@ -207,7 +226,7 @@ export class FamilySearchClient {
       });
     } catch (err) {
       if (this.bridge?.connected) throw err;
-      return fetch(url, { headers: { ...headers, "User-Agent": USER_AGENT }, redirect: "follow" });
+      return this.fetchDirect(url, headers, init);
     }
   }
 }

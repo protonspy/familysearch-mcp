@@ -82,6 +82,36 @@ const checks: [string, () => Promise<unknown>][] = [
       return { from: source, size: `${image.sourceWidth}x${image.sourceHeight}`, output: `${image.width}x${image.height}`, bytes: image.data.length };
     },
   ],
+  [
+    "browse images (pastas da paróquia do documento)",
+    async () => {
+      const doc = await api.locateDocument(docId);
+      const info = await api.getImageInfo(doc.imageId);
+      const parent = info.folders?.at(-2);
+      if (!info.collectionId || !parent?.waypointId) throw new Error("documento sem waypoints");
+      const folder = await api.browseImages(info.collectionId, parent.waypointId, 0, 3);
+      const book = folder.folders?.[0];
+      const books = book?.waypointId ? await api.browseImages(info.collectionId, book.waypointId, 0, 2) : undefined;
+      return { folder: folder.title, subfolders: folder.folders?.length, firstBook: book?.title, images: books?.totalImages, first: books?.images?.[0] };
+    },
+  ],
+  [
+    "full text",
+    () =>
+      api.searchFullText({ text: "Anselmo Cecilia", place: "Pilões, Paraíba, Brasil", collectionId: "2177286", count: 3 }).then((r) => ({
+        total: r.total,
+        hits: r.hits?.map((h) => [h.imageId, h.date, h.type, h.snippets?.[0]?.slice(0, 80)]),
+      })),
+  ],
+  [
+    "catalog",
+    async () => {
+      const search = await api.searchCatalog({ place: "Brasil, Paraíba, Bananeiras", placeExact: true });
+      const item = await api.getCatalogItem("koha:248067");
+      return { total: search.total, items: search.items?.map((i) => i.id), films: item.films?.length, sample: item.films?.find((f) => /Casamentos 1889/.test(f.contents ?? "")) };
+    },
+  ],
+  ["film", () => api.getFilm("4016084", 0, 2).then((f) => ({ total: f.totalImages, first: f.images, catalogs: f.catalogs?.map((c) => c.id) }))],
 ];
 
 let failed = 0;
