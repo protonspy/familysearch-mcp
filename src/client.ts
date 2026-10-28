@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import type { BrowserBridge } from "./bridge.js";
 
 export const FS_JSON = "application/x-fs-v1+json";
 export const FS_ATOM = "application/x-gedcomx-atom+json";
@@ -20,6 +21,30 @@ export class FamilySearchError extends Error {
   }
 }
 
+/** A proteção anti-robô do site respondeu com a página "Pardon Our Interruption" no lugar do conteúdo. */
+export class BotChallengeError extends FamilySearchError {
+  constructor(
+    url: string,
+    readonly viaBrowser: boolean,
+  ) {
+    super(
+      viaBrowser
+        ? 'O FamilySearch pediu uma verificação anti-robô ("Pardon Our Interruption") no navegador. ' +
+            "Abra o FamilySearch no Chrome, conclua a verificação se ela aparecer e tente de novo em alguns minutos."
+        : 'O FamilySearch pausou as requisições com uma verificação anti-robô ("Pardon Our Interruption"). ' +
+            "Aguarde alguns minutos ou conecte a extensão do navegador (fs_browser_status).",
+      429,
+      url,
+    );
+    this.name = "BotChallengeError";
+  }
+}
+
+export type TokenSource = "extension" | "env" | "manual";
+
+/** Depois de um bloqueio anti-robô no modo direto, não insiste em baixar imagens por este tempo. */
+const DIRECT_IMAGE_COOLDOWN_MS = 30 * 60_000;
+
 export interface RequestOptions {
   accept?: string;
   query?: Record<string, string | number | boolean | undefined>;
@@ -35,11 +60,17 @@ export interface BinaryResponse {
 /**
  * Cliente HTTP mínimo da API do FamilySearch autenticado com o token da sessão
  * do navegador (cookie `fssessionid`), enviado como Bearer token.
+ *
+ * Com a extensão do Chrome conectada, as requisições saem do navegador do usuário e o token
+ * é atualizado automaticamente; sem ela, o cliente faz as requisições diretamente.
  */
 export class FamilySearchClient {
   private token: string | undefined;
   private queue: Promise<unknown> = Promise.resolve();
   private lastRequestAt = 0;
+  private bridge?: BrowserBridge;
+  private directImagesBlockedUntil = 0;
+  tokenSource?: TokenSource;
 
   constructor(
     // O site serve tanto a API pública (/platform) quanto os serviços internos (/service) no mesmo host.
@@ -50,14 +81,35 @@ export class FamilySearchClient {
     private readonly minImageIntervalMs = Number(process.env.FAMILYSEARCH_MIN_IMAGE_INTERVAL_MS ?? 1500),
   ) {
     this.token = loadTokenFromEnv();
+    if (this.token) this.tokenSource = "env";
   }
 
-  setToken(token: string) {
+  setToken(token: string, source: TokenSource = "manual") {
     this.token = normalizeToken(token);
+    this.tokenSource = source;
   }
 
   hasToken() {
     return Boolean(this.token);
+  }
+
+  /** Passa a usar a extensão do navegador: requisições pelo Chrome e token da sessão logada. */
+  attachBridge(bridge: BrowserBridge) {
+    this.bridge = bridge;
+    if (bridge.token) this.setToken(bridge.token, "extension");
+    // Logout no navegador não apaga o token atual: o modo direto continua com ele até expirar.
+    bridge.onToken((token) => token && this.setToken(token, "extension"));
+  }
+
+  status() {
+    return {
+      extension: this.bridge
+        ? { port: this.bridge.port, connected: this.bridge.connected, version: this.bridge.extensionVersion, loggedIn: Boolean(this.bridge.token) }
+        : undefined,
+      tokenSource: this.token ? this.tokenSource : undefined,
+      directImagesBlockedUntil:
+        this.directImagesBlockedUntil > Date.now() ? new Date(this.directImagesBlockedUntil).toISOString() : undefined,
+    };
   }
 
   /** GET em uma rota do FamilySearch (ex.: `/platform/tree/persons/KWQS-BBQ`). */
@@ -89,26 +141,27 @@ export class FamilySearchClient {
   private async doRequest<T>(url: string, opts: RequestOptions, binary: boolean, attempt = 0): Promise<T | null> {
     if (!this.token) {
       throw new FamilySearchError(
-        "Nenhum token de sessão configurado. Defina FAMILYSEARCH_TOKEN ou use a tool fs_set_session_token.",
+        "Nenhum token de sessão. Conecte a extensão do Chrome logada no FamilySearch (fs_browser_status), " +
+          "defina FAMILYSEARCH_TOKEN ou use a tool fs_set_session_token.",
         401,
         url,
       );
     }
+    const viaBrowser = Boolean(this.bridge?.connected) && url.startsWith(`${new URL(this.baseUrl).origin}/`);
+    if (binary && !viaBrowser && Date.now() < this.directImagesBlockedUntil) throw new BotChallengeError(url, false);
 
     const wait = this.lastRequestAt + (binary ? Math.max(this.minIntervalMs, this.minImageIntervalMs) : this.minIntervalMs) - Date.now();
     if (wait > 0) await sleep(wait);
     this.lastRequestAt = Date.now();
 
-    const res = await fetch(url, {
-      headers: {
-        Accept: opts.accept ?? FS_JSON,
-        Authorization: `Bearer ${this.token}`,
-        "Accept-Language": this.lang,
-        // O firewall do FamilySearch bloqueia (403, errorCode 15) User-Agents que não parecem de navegador.
-        "User-Agent": USER_AGENT,
-      },
-      redirect: "follow",
-    });
+    const headers = { Accept: opts.accept ?? FS_JSON, Authorization: `Bearer ${this.token}`, "Accept-Language": this.lang };
+    const res = viaBrowser
+      ? await this.fetchViaBrowser(url, headers)
+      : await fetch(url, {
+          // O firewall do FamilySearch bloqueia (403, errorCode 15) User-Agents que não parecem de navegador.
+          headers: { ...headers, "User-Agent": USER_AGENT },
+          redirect: "follow",
+        });
 
     if (res.status === 429 || res.status === 503) {
       if (attempt >= 4) throw new FamilySearchError("FamilySearch limitou as requisições (throttling).", res.status, url);
@@ -127,12 +180,8 @@ export class FamilySearchClient {
     const text = await res.text();
     // A proteção anti-robô do site responde 200 com uma página HTML de desafio no lugar do conteúdo.
     if (contentType.startsWith("text/html") && text.includes("Pardon Our Interruption")) {
-      throw new FamilySearchError(
-        "O FamilySearch pausou as requisições com uma verificação anti-robô (\"Pardon Our Interruption\"). " +
-          "Aguarde alguns minutos antes de tentar de novo e evite muitas imagens em sequência.",
-        429,
-        url,
-      );
+      if (binary && !viaBrowser) this.directImagesBlockedUntil = Date.now() + DIRECT_IMAGE_COOLDOWN_MS;
+      throw new BotChallengeError(url, viaBrowser);
     }
     if (!res.ok) {
       throw new FamilySearchError(describeStatus(res.status, text), res.status, url, text.slice(0, 2000));
@@ -143,6 +192,22 @@ export class FamilySearchClient {
       return JSON.parse(text) as T;
     } catch {
       throw new FamilySearchError("Resposta do FamilySearch não é JSON.", res.status, url, text.slice(0, 500));
+    }
+  }
+
+  /** Executa o GET pela extensão; se ela cair no meio do caminho, faz a requisição diretamente. */
+  private async fetchViaBrowser(url: string, headers: Record<string, string>) {
+    const { pathname, search } = new URL(url);
+    try {
+      const r = await this.bridge!.request(pathname + search, headers);
+      const nullBody = r.status === 204 || r.status === 304;
+      return new Response(nullBody ? null : new Uint8Array(r.body), {
+        status: r.status,
+        headers: { "content-type": r.contentType, ...(r.retryAfter ? { "retry-after": r.retryAfter } : {}) },
+      });
+    } catch (err) {
+      if (this.bridge?.connected) throw err;
+      return fetch(url, { headers: { ...headers, "User-Agent": USER_AGENT }, redirect: "follow" });
     }
   }
 }

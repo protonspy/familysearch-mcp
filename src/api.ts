@@ -1,4 +1,4 @@
-import { FS_ATOM, JSON_TYPE, FamilySearchClient, FamilySearchError } from "./client.js";
+import { FS_ATOM, JSON_TYPE, FamilySearchClient } from "./client.js";
 import {
   type AtomFeed,
   type Gedcomx,
@@ -15,6 +15,7 @@ import {
   summarizeFacts,
   summarizePerson,
 } from "./gedcomx.js";
+import { ImageStore, imageFilePath } from "./images.js";
 import { type Region, parseRectangleRegion } from "./imaging.js";
 
 /**
@@ -46,8 +47,7 @@ export const ROUTES = {
   image: (id: string) => `/platform/records/images/3:1:${id}`,
   /** Entradas de registro indexadas nesta imagem. */
   imageRecords: (id: string) => `/platform/records/images/3:1:${id}/records`,
-  /** Arquivos do visualizador DeepZoom: `dist.jpg` (resolução total), `image.xml`, `thumb_p200.jpg`. */
-  imageFile: (id: string, file: string) => `/service/records/storage/deepzoomcloud/dz/v1/3:1:${id}/${file}`,
+  imageFile: imageFilePath,
   placeSearch: "/platform/places/search",
 } as const;
 
@@ -66,13 +66,6 @@ export function parseDocumentId(input: string): { kind: DocumentKind; id: string
 }
 
 const arkId = (url: string | undefined, prefix: "1:1" | "1:2" | "3:1") => url?.match(new RegExp(`${prefix}:([A-Z0-9-]+)`, "i"))?.[1];
-
-const RESTRICTED_IMAGE =
-  "O FamilySearch não autoriza esta conta a ver esta imagem. Em geral a coleção tem restrição de acesso e a imagem só pode ser " +
-  "vista em um Centro de História da Família ou biblioteca afiliada. O índice continua disponível (fs_get_record, fs_get_document_info).";
-
-/** Quantas imagens em resolução total manter em memória para recortes e ampliações sucessivas. */
-const IMAGE_CACHE_SIZE = 4;
 
 /** Limites aceitos pela API (valores maiores retornam HTTP 400). */
 export const ANCESTRY_MAX_GENERATIONS = 8;
@@ -116,9 +109,10 @@ export interface SearchHit {
 }
 
 export class FamilySearchApi {
-  private readonly imageCache = new Map<string, Buffer>();
-
-  constructor(readonly client: FamilySearchClient) {}
+  constructor(
+    readonly client: FamilySearchClient,
+    readonly images = new ImageStore(client),
+  ) {}
 
   private summarize = (p: GxPerson) => summarizePerson(p, this.client.baseUrl);
 
@@ -475,27 +469,9 @@ export class FamilySearchApi {
     });
   }
 
-  /** Imagem em resolução total (JPEG). Mantém as últimas em memória para recortes sucessivos. */
+  /** Imagem em resolução total (JPEG) e de onde ela veio (memória, cache, Downloads ou rede). */
   async getImageBytes(imageId: string) {
-    const cached = this.imageCache.get(imageId);
-    if (cached) {
-      this.imageCache.delete(imageId);
-      this.imageCache.set(imageId, cached);
-      return cached;
-    }
-    let res;
-    try {
-      res = await this.client.getBinary(ROUTES.imageFile(imageId, "dist.jpg"));
-    } catch (err) {
-      if (err instanceof FamilySearchError && err.status === 403 && !err.body?.includes("blocked by our security service")) {
-        throw new FamilySearchError(RESTRICTED_IMAGE, 403, err.url);
-      }
-      throw err;
-    }
-    if (!res?.data.length) throw new Error(`O FamilySearch não devolveu a imagem 3:1:${imageId}.`);
-    this.imageCache.set(imageId, res.data);
-    if (this.imageCache.size > IMAGE_CACHE_SIZE) this.imageCache.delete(this.imageCache.keys().next().value!);
-    return res.data;
+    return this.images.get(imageId);
   }
 
   async searchPlaces(name: string, count = 10) {

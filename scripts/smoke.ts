@@ -77,8 +77,9 @@ const checks: [string, () => Promise<unknown>][] = [
     "document image",
     async () => {
       const doc = await api.locateDocument(docId);
-      const image = await renderImage(await api.getImageBytes(doc.imageId), { maxSize: 1000, region: doc.region, grid: true });
-      return { source: `${image.sourceWidth}x${image.sourceHeight}`, output: `${image.width}x${image.height}`, bytes: image.data.length };
+      const { data, source } = await api.getImageBytes(doc.imageId);
+      const image = await renderImage(data, { maxSize: 1000, region: doc.region, grid: true });
+      return { from: source, size: `${image.sourceWidth}x${image.sourceHeight}`, output: `${image.width}x${image.height}`, bytes: image.data.length };
     },
   ],
 ];
