@@ -1,9 +1,12 @@
 // Teste de integração contra o FamilySearch real.
 // Uso: FAMILYSEARCH_TOKEN_FILE=~/.familysearch-token npx tsx scripts/smoke.ts [PERSON_ID]
+// SMOKE_SAVE_DIR=<pasta> salva a imagem com as linhas marcadas para conferência visual.
+import { writeFile } from "node:fs/promises";
 import { FamilySearchApi } from "../src/api.js";
 import { FamilySearchClient } from "../src/client.js";
 import { exportTree } from "../src/export.js";
 import { renderImage } from "../src/imaging.js";
+import { marksInRegion } from "../src/transcript.js";
 import { FamilyTree, TreeBuilder, findRelationship } from "../src/tree.js";
 
 const pid = process.argv[2] ?? "KNDX-MKG"; // George Washington, perfil público e bem documentado
@@ -112,6 +115,31 @@ const checks: [string, () => Promise<unknown>][] = [
     },
   ],
   ["film", () => api.getFilm("4016084", 0, 2).then((f) => ({ total: f.totalImages, first: f.images, catalogs: f.catalogs?.map((c) => c.id) }))],
+  [
+    "image text",
+    // Matrimônios de Bananeiras, fev/1906 (livro sem índice).
+    () => api.getImageText("3:1:33SQ-GPQ3-DGM", true).then((t) => ({ source: t.source, lines: t.lines?.length, start: t.text.slice(0, 60) })),
+  ],
+  [
+    "marked lines",
+    // Casamento de 23/05/1905 (assento nº 94): marcas de linha sobre o recorte realçado.
+    async () => {
+      const region = { x: 0.04, y: 0.628, width: 0.41, height: 0.248 };
+      const { page } = await api.texts.get("33S7-9PQ3-DP6");
+      const marks = marksInRegion(page!, region);
+      const { data } = await api.getImageBytes("33S7-9PQ3-DP6");
+      const image = await renderImage(data, { region, maxSize: 1568, enhance: true, marks });
+      if (process.env.SMOKE_SAVE_DIR) await writeFile(`${process.env.SMOKE_SAVE_DIR}/marked-lines.jpg`, image.data);
+      return { margin: marks.filter((m) => m.kind === "margin").map((m) => m.text), body: marks.filter((m) => m.kind === "body").length, bytes: image.data.length };
+    },
+  ],
+  [
+    "book text search",
+    () =>
+      api
+        .searchBookText({ collectionId: "2177286", waypointId: "9VR1-6YS:370202701,370144202,370997701", fromImage: 124, toImage: 128, terms: ["Manoel", "Paulino"] })
+        .then((r) => ({ book: r.book, searched: r.searched, downloaded: r.downloaded, hits: r.totalHits, first: r.hits?.[0] && { image: r.hits[0].imageNumber, found: r.hits[0].matches.map((m) => m.found) } })),
+  ],
 ];
 
 let failed = 0;

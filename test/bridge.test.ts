@@ -76,6 +76,14 @@ test("com a extensão conectada, o cliente usa o token e as requisições do nav
   assert.equal(seen[1].method, "POST");
   assert.deepEqual(JSON.parse(seen[1].body), { type: "film-data" });
   assert.equal(seen[1].headers["Content-Type"], "application/json");
+
+  // Transcrições: outro host, com o cabeçalho de identificação; a extensão recebe o host em `origin`.
+  const transcript = "https://sg30p0.familysearch.org/service/records/volunteer/orchestration/sls/image/records/3:1:AAAA-BBB";
+  await client.get(transcript, { headers: { "FS-User-Agent-Chain": "familysearch-mcp" } });
+  assert.equal(seen[2].origin, "https://sg30p0.familysearch.org");
+  assert.equal(seen[2].path, "/service/records/volunteer/orchestration/sls/image/records/3:1:AAAA-BBB");
+  assert.equal(seen[2].headers["FS-User-Agent-Chain"], "familysearch-mcp");
+  assert.equal(seen[0].origin, undefined);
   seen.length = 1;
 
   await assert.rejects(client.getBinary("/service/records/storage/deepzoomcloud/dz/v1/3:1:AAAA-BBBB-CC/dist.jpg"), (err) => {

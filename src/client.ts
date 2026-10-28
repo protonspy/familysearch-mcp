@@ -5,6 +5,8 @@ export const FS_JSON = "application/x-fs-v1+json";
 export const FS_ATOM = "application/x-gedcomx-atom+json";
 /** Os serviços de busca do site (/service/search/...) só aceitam JSON genérico. */
 export const JSON_TYPE = "application/json";
+/** Host das transcrições automáticas das páginas; o único fora de www que também passa pela extensão. */
+export const TRANSCRIPT_ORIGIN = "https://sg30p0.familysearch.org";
 const USER_AGENT =
   process.env.FAMILYSEARCH_USER_AGENT ??
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
@@ -52,6 +54,8 @@ export interface RequestOptions {
   allowNotFound?: boolean;
   /** Corpo JSON de um POST (só usado por `post`). */
   body?: unknown;
+  /** Cabeçalhos extras (ex.: `FS-User-Agent-Chain`, exigido pelo serviço de transcrições). */
+  headers?: Record<string, string>;
 }
 
 export interface BinaryResponse {
@@ -157,19 +161,31 @@ export class FamilySearchClient {
         url,
       );
     }
-    const viaBrowser = Boolean(this.bridge?.connected) && url.startsWith(`${new URL(this.baseUrl).origin}/`);
+    const origin = new URL(url).origin;
+    const viaBrowser = Boolean(this.bridge?.connected) && (origin === new URL(this.baseUrl).origin || origin === TRANSCRIPT_ORIGIN);
     if (binary && !viaBrowser && Date.now() < this.directImagesBlockedUntil) throw new BotChallengeError(url, false);
 
     const wait = this.lastRequestAt + (binary ? Math.max(this.minIntervalMs, this.minImageIntervalMs) : this.minIntervalMs) - Date.now();
     if (wait > 0) await sleep(wait);
     this.lastRequestAt = Date.now();
 
-    const headers: Record<string, string> = { Accept: opts.accept ?? FS_JSON, Authorization: `Bearer ${this.token}`, "Accept-Language": this.lang };
+    const headers: Record<string, string> = {
+      Accept: opts.accept ?? FS_JSON,
+      Authorization: `Bearer ${this.token}`,
+      "Accept-Language": this.lang,
+      ...opts.headers,
+    };
     const init = opts.body === undefined ? undefined : { method: "POST", body: JSON.stringify(opts.body) };
     if (init) headers["Content-Type"] = JSON_TYPE;
-    const res = viaBrowser
-      ? await this.fetchViaBrowser(url, headers, init)
-      : await this.fetchDirect(url, headers, init);
+    let res: Response;
+    try {
+      res = viaBrowser ? await this.fetchViaBrowser(url, headers, init) : await this.fetchDirect(url, headers, init);
+    } catch (err) {
+      // Queda de conexão (ECONNRESET, "fetch failed") no meio de uma varredura longa: tenta de novo algumas vezes.
+      if (!(err instanceof TypeError) || attempt >= 2) throw err;
+      await sleep(1000 * 2 ** attempt);
+      return this.doRequest<T>(url, opts, binary, attempt + 1);
+    }
 
     if (res.status === 429 || res.status === 503) {
       if (attempt >= 4) throw new FamilySearchError("FamilySearch limitou as requisições (throttling).", res.status, url);
@@ -216,9 +232,10 @@ export class FamilySearchClient {
 
   /** Executa a requisição pela extensão; se ela cair no meio do caminho, faz a requisição diretamente. */
   private async fetchViaBrowser(url: string, headers: Record<string, string>, init?: { method: string; body: string }) {
-    const { pathname, search } = new URL(url);
+    const { origin, pathname, search } = new URL(url);
     try {
-      const r = await this.bridge!.request(pathname + search, headers, init);
+      // Fora do host principal (transcrições), a extensão precisa saber o host de destino.
+      const r = await this.bridge!.request(pathname + search, headers, init, origin === new URL(this.baseUrl).origin ? undefined : origin);
       const nullBody = r.status === 204 || r.status === 304;
       return new Response(nullBody ? null : new Uint8Array(r.body), {
         status: r.status,
