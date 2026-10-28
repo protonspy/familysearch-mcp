@@ -3,9 +3,12 @@
 import { FamilySearchApi } from "../src/api.js";
 import { FamilySearchClient } from "../src/client.js";
 import { exportTree } from "../src/export.js";
+import { renderImage } from "../src/imaging.js";
 import { FamilyTree, TreeBuilder, findRelationship } from "../src/tree.js";
 
 const pid = process.argv[2] ?? "KNDX-MKG"; // George Washington, perfil público e bem documentado
+// Óbito de 1945 no Registro Civil da Paraíba: coleção com imagens abertas e região do assento marcada.
+const docId = process.env.SMOKE_DOCUMENT_ID ?? "QLZ1-89HC";
 const api = new FamilySearchApi(new FamilySearchClient());
 
 const checks: [string, () => Promise<unknown>][] = [
@@ -59,6 +62,23 @@ const checks: [string, () => Promise<unknown>][] = [
       await new TreeBuilder(api).build(tree, { ancestorGenerations: 10, descendantGenerations: 2, maxPersons: 600 });
       const ged = exportTree(tree, "gedcom");
       return { ...tree.stats(), gedcomLines: ged.split("\n").length };
+    },
+  ],
+  [
+    "document info",
+    async () => {
+      const doc = await api.locateDocument(docId);
+      const info = await api.getImageInfo(doc.imageId);
+      const index = await api.getImageIndex(doc.imageId, 3);
+      return { imageId: doc.imageId, page: `${info.imageNumber}/${info.totalImages}`, viewable: info.viewable, folder: info.folderPath, indexed: index.total };
+    },
+  ],
+  [
+    "document image",
+    async () => {
+      const doc = await api.locateDocument(docId);
+      const image = await renderImage(await api.getImageBytes(doc.imageId), { maxSize: 1000, region: doc.region, grid: true });
+      return { source: `${image.sourceWidth}x${image.sourceHeight}`, output: `${image.width}x${image.height}`, bytes: image.data.length };
     },
   ],
 ];

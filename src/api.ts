@@ -1,8 +1,9 @@
-import { FS_ATOM, JSON_TYPE, FamilySearchClient } from "./client.js";
+import { FS_ATOM, JSON_TYPE, FamilySearchClient, FamilySearchError } from "./client.js";
 import {
   type AtomFeed,
   type Gedcomx,
   type GxPerson,
+  type GxSourceDescription,
   type PersonSummary,
   type SearchFacet,
   allNames,
@@ -14,6 +15,7 @@ import {
   summarizeFacts,
   summarizePerson,
 } from "./gedcomx.js";
+import { type Region, parseRectangleRegion } from "./imaging.js";
 
 /**
  * Rotas do FamilySearch usadas pelo servidor, mapeadas a partir do tráfego do site
@@ -38,8 +40,39 @@ export const ROUTES = {
   recordSearch: "/service/search/hr/v2/personas",
   persona: (id: string) => `/platform/records/personas/${id}`,
   personaMatches: (id: string) => `/platform/records/personas/${id}/matches`,
+  /** Entrada de registro (ark 1:2): o assento inteiro, com todas as pessoas e a região na imagem. */
+  recordEntry: (id: string) => `/platform/records/records/${id}`,
+  /** Metadados da imagem (ark 3:1): pasta, citação, posição no filme e links anterior/seguinte. */
+  image: (id: string) => `/platform/records/images/3:1:${id}`,
+  /** Entradas de registro indexadas nesta imagem. */
+  imageRecords: (id: string) => `/platform/records/images/3:1:${id}/records`,
+  /** Arquivos do visualizador DeepZoom: `dist.jpg` (resolução total), `image.xml`, `thumb_p200.jpg`. */
+  imageFile: (id: string, file: string) => `/service/records/storage/deepzoomcloud/dz/v1/3:1:${id}/${file}`,
   placeSearch: "/platform/places/search",
 } as const;
+
+export type DocumentKind = "persona" | "record" | "image";
+
+/** Identifica o tipo de id: persona (ark 1:1), entrada de registro (ark 1:2) ou imagem (ark 3:1). */
+export function parseDocumentId(input: string): { kind: DocumentKind; id: string } {
+  const value = input.trim();
+  const ark = value.match(/\b(1:1|1:2|3:1):([A-Z0-9]+(?:-[A-Z0-9]+)+)/i);
+  if (ark) return { kind: ark[1] === "1:1" ? "persona" : ark[1] === "1:2" ? "record" : "image", id: ark[2].toUpperCase() };
+  const id = value.toUpperCase();
+  if (/^[A-Z0-9]{4}-[A-Z0-9]{2,4}$/.test(id)) return { kind: "persona", id };
+  // Ids de imagem têm 3 ou 4 blocos (ex.: S3HY-6DWJ-XX, 3Q9M-C95G-39YP-C).
+  if (/^[A-Z0-9]{4}(?:-[A-Z0-9]{1,4}){2,3}$/.test(id)) return { kind: "image", id };
+  throw new Error(`Id de documento não reconhecido: "${input}". Use o id de um registro (ex.: QLZ1-89HC) ou um ark 1:1, 1:2 ou 3:1.`);
+}
+
+const arkId = (url: string | undefined, prefix: "1:1" | "1:2" | "3:1") => url?.match(new RegExp(`${prefix}:([A-Z0-9-]+)`, "i"))?.[1];
+
+const RESTRICTED_IMAGE =
+  "O FamilySearch não autoriza esta conta a ver esta imagem. Em geral a coleção tem restrição de acesso e a imagem só pode ser " +
+  "vista em um Centro de História da Família ou biblioteca afiliada. O índice continua disponível (fs_get_record, fs_get_document_info).";
+
+/** Quantas imagens em resolução total manter em memória para recortes e ampliações sucessivas. */
+const IMAGE_CACHE_SIZE = 4;
 
 /** Limites aceitos pela API (valores maiores retornam HTTP 400). */
 export const ANCESTRY_MAX_GENERATIONS = 8;
@@ -83,6 +116,8 @@ export interface SearchHit {
 }
 
 export class FamilySearchApi {
+  private readonly imageCache = new Map<string, Buffer>();
+
   constructor(readonly client: FamilySearchClient) {}
 
   private summarize = (p: GxPerson) => summarizePerson(p, this.client.baseUrl);
@@ -332,6 +367,137 @@ export class FamilySearchApi {
     };
   }
 
+  /**
+   * Localiza a imagem de um documento a partir de uma persona (1:1), entrada (1:2) ou da própria imagem (3:1),
+   * com a região do assento na página quando o indexador a marcou.
+   */
+  async locateDocument(input: string) {
+    const ref = parseDocumentId(input);
+    if (ref.kind === "image") return { imageId: ref.id } as { imageId: string; region?: Region; recordId?: string; title?: string };
+
+    const data = await this.client.get<Gedcomx>(ref.kind === "persona" ? ROUTES.persona(ref.id) : ROUTES.recordEntry(ref.id));
+    if (!data) throw new Error("Registro não encontrado.");
+    const sds = data.sourceDescriptions ?? [];
+    const record = sds.find((s) => s.resourceType?.endsWith("/Record"));
+    const link = imageLink(record, sds) ?? { image: sds.find((s) => s.resourceType?.endsWith("/DigitalArtifact")), region: undefined };
+    const imageId = arkId(link.image?.about, "3:1");
+    if (!imageId) throw new Error("Este registro não tem imagem associada no FamilySearch (existe só o índice).");
+    return clean({ imageId, region: link.region, recordId: arkId(record?.about, "1:2"), title: record?.titles?.[0]?.value });
+  }
+
+  /** Metadados de uma imagem: pasta no filme, posição (imagem N de M), citação, vizinhas e se a conta pode vê-la. */
+  async getImageInfo(imageId: string) {
+    const data = await this.client.get<Gedcomx>(ROUTES.image(imageId));
+    if (!data) throw new Error(`Imagem 3:1:${imageId} não encontrada.`);
+    const sds = data.sourceDescriptions ?? [];
+    const byId = new Map(sds.map((s) => [s.id, s]));
+    const main = sds.find((s) => s.resourceType?.endsWith("/DigitalArtifact")) ?? sds[0];
+
+    // A imagem aponta para a pasta que a contém, que aponta para a pasta acima, até a coleção.
+    const folders: string[] = [];
+    for (let sd = byId.get(main?.componentOf?.description?.replace(/^#/, "")); sd && folders.length < 10; ) {
+      const title = sd.titles?.[0]?.value;
+      if (title && title !== folders[0]) folders.unshift(title);
+      sd = byId.get(sd.componentOf?.description?.replace(/^#/, ""));
+    }
+    const collection = main?.titles?.[0]?.value?.split("; http")[0];
+    if (collection && folders[0] !== collection) folders.unshift(collection);
+
+    return clean({
+      imageId,
+      url: `${this.client.baseUrl}/ark:/61903/3:1:${imageId}`,
+      viewable: Boolean(data.links?.["image-deepzoom"] ?? data.links?.["image-stream-image-dist"]),
+      imageNumber: data.links?.self?.offset,
+      totalImages: data.links?.self?.results,
+      folderPath: folders.join(" > ") || undefined,
+      citation: main?.citations?.[0]?.value?.trim(),
+      previousImageId: arkId(data.links?.prev?.href, "3:1"),
+      nextImageId: arkId(data.links?.next?.href, "3:1"),
+    });
+  }
+
+  /** Anda `step` imagens para frente (positivo) ou para trás (negativo) no filme. */
+  async stepImage(imageId: string, step: number) {
+    let current = imageId;
+    for (let i = 0; i < Math.abs(step); i++) {
+      const info = await this.getImageInfo(current);
+      const next = step > 0 ? info.nextImageId : info.previousImageId;
+      if (!next) throw new Error(`Não há imagem ${step > 0 ? "seguinte" : "anterior"} a 3:1:${current} nesta pasta.`);
+      current = next;
+    }
+    return current;
+  }
+
+  /** Entradas indexadas em uma imagem, cada uma com evento, pessoas, papéis e região na página. */
+  async getImageIndex(imageId: string, limit = 25) {
+    const data = await this.client.get<Gedcomx>(ROUTES.imageRecords(imageId));
+    const ids = (data?.sourceDescriptions ?? [])
+      .filter((s) => s.resourceType?.endsWith("/Record"))
+      .map((s) => s.id ?? arkId(s.about, "1:2"))
+      .filter((id): id is string => Boolean(id));
+    const records = [];
+    for (const id of ids.slice(0, limit)) records.push(await this.getRecordEntry(id));
+    return { total: ids.length, records };
+  }
+
+  /** Entrada de registro (ark 1:2): o evento e todas as pessoas do assento, com papel em relação ao principal. */
+  async getRecordEntry(id: string) {
+    const data = await this.client.get<Gedcomx>(ROUTES.recordEntry(id));
+    if (!data) throw new Error(`Entrada de registro 1:2:${id} não encontrada.`);
+    const persons = data.persons ?? [];
+    const principal = persons.find((p) => p.principal) ?? persons[0];
+    const roleOf = (p: GxPerson) => {
+      if (p === principal) return "Principal";
+      if (p.display?.role && !/^(Other|Principal)$/i.test(p.display.role)) return p.display.role;
+      for (const r of data.relationships ?? []) {
+        const a = refId(r.person1);
+        const b = refId(r.person2);
+        if (!principal || ![a, b].includes(principal.id) || ![a, b].includes(p.id)) continue;
+        const type = r.type?.split("/").pop();
+        if (type === "Couple") return "Spouse";
+        if (type === "ParentChild") {
+          if (a === principal.id) return "Child";
+          const gender = p.gender?.type?.split("/").pop();
+          return gender === "Male" ? "Father" : gender === "Female" ? "Mother" : "Parent";
+        }
+      }
+      return "Other";
+    };
+    const sds = data.sourceDescriptions ?? [];
+    const record = sds.find((s) => s.resourceType?.endsWith("/Record"));
+    const link = imageLink(record, sds);
+    return clean({
+      recordId: id,
+      title: record?.titles?.[0]?.value,
+      facts: principal ? summarizeFacts(principal.facts) : undefined,
+      persons: persons.map((p) => clean({ role: roleOf(p), name: this.summarize(p).name, personaId: arkId(personaArk(p), "1:1") })),
+      region: link?.region,
+    });
+  }
+
+  /** Imagem em resolução total (JPEG). Mantém as últimas em memória para recortes sucessivos. */
+  async getImageBytes(imageId: string) {
+    const cached = this.imageCache.get(imageId);
+    if (cached) {
+      this.imageCache.delete(imageId);
+      this.imageCache.set(imageId, cached);
+      return cached;
+    }
+    let res;
+    try {
+      res = await this.client.getBinary(ROUTES.imageFile(imageId, "dist.jpg"));
+    } catch (err) {
+      if (err instanceof FamilySearchError && err.status === 403 && !err.body?.includes("blocked by our security service")) {
+        throw new FamilySearchError(RESTRICTED_IMAGE, 403, err.url);
+      }
+      throw err;
+    }
+    if (!res?.data.length) throw new Error(`O FamilySearch não devolveu a imagem 3:1:${imageId}.`);
+    this.imageCache.set(imageId, res.data);
+    if (this.imageCache.size > IMAGE_CACHE_SIZE) this.imageCache.delete(this.imageCache.keys().next().value!);
+    return res.data;
+  }
+
   async searchPlaces(name: string, count = 10) {
     const feed = await this.client.get<any>(ROUTES.placeSearch, { accept: FS_ATOM, query: { q: `name:"${name}"`, count } });
     return (feed?.entries ?? []).map((e: any) => {
@@ -346,6 +512,18 @@ export class FamilySearchApi {
       });
     });
   }
+}
+
+/** Imagem referenciada pelo registro e a região do assento nela (`RectangleRegion` do indexador), se houver. */
+function imageLink(record: GxSourceDescription | undefined, sds: GxSourceDescription[]) {
+  for (const src of record?.sources ?? []) {
+    const id = src.descriptionId ?? src.description?.replace(/^#/, "");
+    const image = sds.find((s) => s.id === id && s.resourceType?.endsWith("/DigitalArtifact"));
+    if (!image) continue;
+    const region = parseRectangleRegion(src.qualifiers?.find((q) => q.name?.endsWith("RectangleRegion"))?.value);
+    return { image, region };
+  }
+  return undefined;
 }
 
 const NAME_KEYS = ["givenName", "surname"] as const;
