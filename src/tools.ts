@@ -4,6 +4,7 @@ import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { ANCESTRY_MAX_GENERATIONS, DESCENDANCY_MAX_GENERATIONS, FamilySearchApi, type SearchQuery } from "./api.js";
+import { EXTENSION_DIR } from "./bridge.js";
 import { FamilySearchError } from "./client.js";
 import { EXTENSIONS, type ExportFormat, exportTree } from "./export.js";
 import { clean } from "./gedcomx.js";
@@ -113,14 +114,44 @@ export function registerTools(server: McpServer, api: FamilySearchApi) {
     {
       title: "Definir token de sessão",
       description:
-        "Define o token de sessão do FamilySearch (valor do cookie `fssessionid` de um navegador logado em familysearch.org). " +
-        "Use quando as outras tools retornarem erro 401/token expirado.",
+        "Define manualmente o token de sessão do FamilySearch (valor do cookie `fssessionid` de um navegador logado em familysearch.org). " +
+        "Desnecessário com a extensão do Chrome conectada, que envia o token automaticamente (veja fs_browser_status).",
       inputSchema: z.object({ token: z.string().min(10).describe("Valor do cookie fssessionid") }),
     },
     safe(async ({ token }) => {
       api.client.setToken(token);
       const user = await api.currentUser();
       return { ok: true, user };
+    }),
+  );
+
+  server.registerTool(
+    "fs_browser_status",
+    {
+      title: "Conexão com o navegador",
+      description:
+        "Mostra se a extensão do Chrome está conectada (requisições pelo navegador e token automático), de onde vem o token, " +
+        "se o download direto de imagens está em pausa e onde ficam cache e Downloads. Inclui as instruções de instalação da extensão.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    safe(async () => {
+      const status = api.client.status();
+      return clean({
+        ...status,
+        mode: status.extension?.connected ? "navegador (extensão)" : "direto",
+        imageCacheDir: api.images.cacheDir,
+        downloadsDir: api.images.downloadsDir,
+        setup: status.extension?.connected
+          ? undefined
+          : status.extension
+            ? [
+                "1. Abra chrome://extensions e ative o Modo do desenvolvedor.",
+                `2. Clique em "Carregar sem compactação" e escolha a pasta ${EXTENSION_DIR}.`,
+                "3. Faça login no FamilySearch nesse Chrome; a extensão conecta e envia o token sozinha.",
+              ]
+            : ["Ponte com a extensão desativada (FAMILYSEARCH_BRIDGE_PORT=0 ou porta ocupada por outra instância do MCP)."],
+      });
     }),
   );
 
@@ -367,7 +398,7 @@ export function registerTools(server: McpServer, api: FamilySearchApi) {
       const doc = await api.locateDocument(documentId);
       const imageId = step ? await api.stepImage(doc.imageId, step) : doc.imageId;
       const info = await api.getImageInfo(imageId);
-      const source = await api.getImageBytes(imageId);
+      const { data: source, source: imageSource } = await api.getImageBytes(imageId);
       // A região do indexador só vale para a imagem do próprio registro.
       const recordRegion = step ? undefined : doc.region;
       const crop = region ?? (focusRecord && recordRegion ? padRegion(recordRegion, margin) : undefined);
@@ -386,6 +417,7 @@ export function registerTools(server: McpServer, api: FamilySearchApi) {
         ...info,
         record: doc.recordId ? clean({ recordId: doc.recordId, title: doc.title, region: recordRegion }) : undefined,
         shownRegion: image.region,
+        imageSource,
         sourceSize: `${image.sourceWidth}x${image.sourceHeight}`,
         outputSize: `${image.width}x${image.height}`,
         scale: image.scale,

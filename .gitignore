@@ -4,3 +4,6 @@ exports/
 .env
 *.log
 .familysearch-token
+extension/config.json
+*.pem
+*.crx
